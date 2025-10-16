@@ -1,0 +1,48 @@
+# Office365 CLI Configuration Example
+#
+# Copy this file to ~/.config/o365/config and customize for your setup.
+#
+# Priority: Environment variables > Config file > Defaults
+
+[auth]
+# Azure AD Application ID (required)
+# Get this from: https://portal.azure.com > App registrations
+client_id = your-azure-ad-application-id
+
+# Azure AD Tenant ID (required)
+# Get this from: https://portal.azure.com > Azure Active Directory > Overview
+# Or use "common" for multi-tenant apps
+tenant = your-azure-ad-tenant-id
+
+[scopes]
+# Option 1: Enable/disable entire command groups
+# All are enabled by default if not specified
+mail = true
+calendar = true
+contacts = true
+
+# Option 2: Specify custom scopes (comma-separated)
+# Uncomment and modify to request only specific permissions:
+# custom = https://graph.microsoft.com/Mail.Read,https://graph.microsoft.com/Mail.ReadWrite,https://graph.microsoft.com/User.Read,offline_access
+
+[paths]
+# Where to store OAuth tokens (default: ~/.config/o365/tokens.json)
+# token_file = ~/.config/o365/tokens.json
+
+# Where to store local email cache (default: ~/.mail/office365/)
+# mail_dir = ~/.mail/office365/
+
+# Environment Variable Reference
+# ============================
+# You can also configure via environment variables (highest priority):
+#
+# O365_CLIENT_ID     - Azure AD application ID
+# O365_TENANT        - Azure AD tenant ID (or "common")
+# O365_SCOPES        - Comma-separated list of scopes
+# O365_TOKEN_FILE    - Path to token file
+# O365_MAIL_DIR      - Path to local mail directory
+#
+# Example:
+# export O365_CLIENT_ID="your-app-id"
+# export O365_TENANT="your-tenant-id"
+# export O365_SCOPES="https://graph.microsoft.com/Mail.Read,https://graph.microsoft.com/User.Read,offline_access"

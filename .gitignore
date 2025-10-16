@@ -122,8 +122,11 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Office365 specific
+# Office365 specific (old paths)
 .o365-tokens.json
+
+# Office365 specific (current paths)
+.config/o365/
 .mail/
 .sync-state.json
 

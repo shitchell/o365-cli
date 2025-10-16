@@ -6,18 +6,23 @@ Shared constants, API helpers, and utility functions used across all commands.
 
 import json
 import sys
+import os
 import urllib.request
 import urllib.parse
 from pathlib import Path
+from configparser import ConfigParser
 
-# Configuration
-TOKEN_FILE = Path.home() / ".o365-tokens.json"
+# Graph API base URL
 GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
 
-# OAuth Configuration
-CLIENT_ID = "79e622ea-fbd8-47c3-b02a-6b777b5cbf3c"
-TENANT = "fd5a5762-9274-4086-aefb-aca071a100b3"
-SCOPES = [
+# Default configuration paths
+CONFIG_DIR = Path.home() / ".config" / "o365"
+CONFIG_FILE = CONFIG_DIR / "config"
+DEFAULT_TOKEN_FILE = CONFIG_DIR / "tokens.json"
+DEFAULT_MAIL_DIR = Path.home() / ".mail" / "office365"
+
+# Default scopes (if not configured)
+DEFAULT_SCOPES = [
     "https://graph.microsoft.com/Calendars.Read",
     "https://graph.microsoft.com/Calendars.ReadWrite",
     "https://graph.microsoft.com/Calendars.ReadWrite.Shared",
@@ -29,6 +34,144 @@ SCOPES = [
     "https://graph.microsoft.com/User.Read",
     "offline_access"
 ]
+
+
+def load_config():
+    """
+    Load configuration from environment variables and config file.
+
+    Priority: Environment variables > Config file > Defaults
+
+    Environment variables:
+    - O365_CLIENT_ID: Azure AD application ID
+    - O365_TENANT: Azure AD tenant ID (or "common")
+    - O365_SCOPES: Comma-separated list of scopes
+    - O365_TOKEN_FILE: Path to token file
+    - O365_MAIL_DIR: Path to local mail directory
+
+    Config file (~/.config/o365/config):
+    [auth]
+    client_id = your-client-id
+    tenant = your-tenant-id
+
+    [scopes]
+    # Enable/disable command groups
+    mail = true
+    calendar = true
+    contacts = true
+
+    # Or specify custom scopes
+    # custom = Mail.Read,Contacts.Read,User.Read,offline_access
+
+    [paths]
+    token_file = ~/.config/o365/tokens.json
+    mail_dir = ~/.mail/office365/
+
+    Returns:
+        dict with keys: client_id, tenant, scopes, token_file, mail_dir
+    """
+    config = {
+        'client_id': None,
+        'tenant': None,
+        'scopes': DEFAULT_SCOPES.copy(),
+        'token_file': DEFAULT_TOKEN_FILE,
+        'mail_dir': DEFAULT_MAIL_DIR
+    }
+
+    # Load from config file if it exists
+    if CONFIG_FILE.exists():
+        parser = ConfigParser()
+        parser.read(CONFIG_FILE)
+
+        # Auth section
+        if parser.has_option('auth', 'client_id'):
+            config['client_id'] = parser.get('auth', 'client_id')
+        if parser.has_option('auth', 'tenant'):
+            config['tenant'] = parser.get('auth', 'tenant')
+
+        # Scopes section
+        if parser.has_section('scopes'):
+            if parser.has_option('scopes', 'custom'):
+                # Custom scopes specified
+                custom_scopes = parser.get('scopes', 'custom')
+                config['scopes'] = [s.strip() for s in custom_scopes.split(',')]
+            else:
+                # Build scopes from enabled command groups
+                scopes = []
+
+                if parser.getboolean('scopes', 'mail', fallback=True):
+                    scopes.extend([
+                        "https://graph.microsoft.com/Mail.ReadWrite",
+                        "https://graph.microsoft.com/Mail.Send",
+                        "https://graph.microsoft.com/MailboxSettings.Read"
+                    ])
+
+                if parser.getboolean('scopes', 'calendar', fallback=True):
+                    scopes.extend([
+                        "https://graph.microsoft.com/Calendars.Read",
+                        "https://graph.microsoft.com/Calendars.ReadWrite",
+                        "https://graph.microsoft.com/Calendars.ReadWrite.Shared"
+                    ])
+
+                if parser.getboolean('scopes', 'contacts', fallback=True):
+                    scopes.extend([
+                        "https://graph.microsoft.com/Contacts.Read",
+                        "https://graph.microsoft.com/Contacts.ReadWrite"
+                    ])
+
+                # Always include User.Read and offline_access
+                scopes.extend([
+                    "https://graph.microsoft.com/User.Read",
+                    "offline_access"
+                ])
+
+                if scopes:
+                    config['scopes'] = scopes
+
+        # Paths section
+        if parser.has_option('paths', 'token_file'):
+            config['token_file'] = Path(parser.get('paths', 'token_file')).expanduser()
+        if parser.has_option('paths', 'mail_dir'):
+            config['mail_dir'] = Path(parser.get('paths', 'mail_dir')).expanduser()
+
+    # Override with environment variables
+    if os.environ.get('O365_CLIENT_ID'):
+        config['client_id'] = os.environ['O365_CLIENT_ID']
+    if os.environ.get('O365_TENANT'):
+        config['tenant'] = os.environ['O365_TENANT']
+    if os.environ.get('O365_SCOPES'):
+        config['scopes'] = [s.strip() for s in os.environ['O365_SCOPES'].split(',')]
+    if os.environ.get('O365_TOKEN_FILE'):
+        config['token_file'] = Path(os.environ['O365_TOKEN_FILE']).expanduser()
+    if os.environ.get('O365_MAIL_DIR'):
+        config['mail_dir'] = Path(os.environ['O365_MAIL_DIR']).expanduser()
+
+    # Validate required fields
+    if not config['client_id']:
+        print("Error: OAuth client_id not configured.", file=sys.stderr)
+        print("Please set O365_CLIENT_ID environment variable or add to ~/.config/o365/config:", file=sys.stderr)
+        print("  [auth]", file=sys.stderr)
+        print("  client_id = your-azure-ad-app-id", file=sys.stderr)
+        sys.exit(1)
+
+    if not config['tenant']:
+        print("Error: OAuth tenant not configured.", file=sys.stderr)
+        print("Please set O365_TENANT environment variable or add to ~/.config/o365/config:", file=sys.stderr)
+        print("  [auth]", file=sys.stderr)
+        print("  tenant = your-tenant-id", file=sys.stderr)
+        print("  # Or use: tenant = common", file=sys.stderr)
+        sys.exit(1)
+
+    return config
+
+
+# Load configuration once at module import
+_CONFIG = load_config()
+CLIENT_ID = _CONFIG['client_id']
+TENANT = _CONFIG['tenant']
+SCOPES = _CONFIG['scopes']
+TOKEN_FILE = _CONFIG['token_file']
+MAIL_DIR = _CONFIG['mail_dir']
 
 
 def load_tokens():
@@ -43,6 +186,8 @@ def load_tokens():
 
 def save_tokens(tokens):
     """Save OAuth2 tokens to file"""
+    # Create directory if it doesn't exist
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
     TOKEN_FILE.write_text(json.dumps(tokens, indent=2))
     TOKEN_FILE.chmod(0o600)
 
