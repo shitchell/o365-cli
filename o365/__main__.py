@@ -24,6 +24,7 @@ Examples:
   o365 files list /Documents          # List files in Documents
   o365 recordings list --since "1 week ago"  # List recent recordings
   o365 contacts search john           # Search for a contact
+  o365 config set auth.client_id "your-id"   # Set config value
   o365 auth status                    # Check authentication status
 
 For more help on a specific command:
@@ -63,8 +64,12 @@ For more help on a specific command:
     auth_parser = subparsers.add_parser('auth', help='Manage OAuth2 authentication')
     auth_subparsers = auth_parser.add_subparsers(dest='auth_command', help='Authentication operations')
 
+    # Config commands
+    config_parser = subparsers.add_parser('config', help='Manage configuration settings')
+    config_subparsers = config_parser.add_subparsers(dest='config_command', help='Configuration operations')
+
     # Import and setup subcommands (lazy import to avoid loading all modules at startup)
-    from . import mail, calendar, contacts, chat, files, recordings, auth
+    from . import mail, calendar, contacts, chat, files, recordings, auth, config_cmd
 
     # Setup each command group's subparsers
     mail.setup_parser(mail_subparsers)
@@ -74,6 +79,7 @@ For more help on a specific command:
     files.setup_parser(files_subparsers)
     recordings.setup_parser(recordings_subparsers)
     auth.setup_parser(auth_subparsers)
+    config_cmd.setup_parser(config_subparsers)
 
     # Parse arguments
     args = parser.parse_args()
@@ -125,6 +131,12 @@ For more help on a specific command:
             auth_parser.print_help()
             sys.exit(1)
         auth.handle_command(args)
+
+    elif args.command == 'config':
+        if not args.config_command:
+            config_parser.print_help()
+            sys.exit(1)
+        config_cmd.handle_command(args)
 
 
 if __name__ == '__main__':

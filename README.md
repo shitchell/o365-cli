@@ -227,6 +227,31 @@ o365 auth refresh
 o365 auth status
 ```
 
+### Config Commands
+
+```bash
+# List all configuration values
+o365 config list
+
+# Get a specific value
+o365 config get auth.client_id
+o365 config get scopes.mail
+
+# Set a value
+o365 config set auth.client_id "your-client-id"
+o365 config set auth.tenant "common"
+o365 config set scopes.files.all "true"
+
+# Remove a value
+o365 config unset scopes.custom
+
+# Edit config file in editor
+o365 config edit
+
+# Show config file path
+o365 config path
+```
+
 ## Configuration
 
 ### Required Setup
