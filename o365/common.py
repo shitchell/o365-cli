@@ -281,7 +281,15 @@ def make_graph_request(url, access_token, method="GET", data=None):
             return json.loads(body)
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()
-        print(f"Graph API Error: {e.code} - {error_body}", file=sys.stderr)
+
+        # Special handling for authentication errors
+        if e.code == 401:
+            print(f"\nError: Authentication failed (401 Unauthorized)", file=sys.stderr)
+            print(f"Your access token may have expired or is invalid.", file=sys.stderr)
+            print(f"\nPlease re-authenticate with: o365 auth login\n", file=sys.stderr)
+        else:
+            print(f"Graph API Error: {e.code} - {error_body}", file=sys.stderr)
+
         return None
 
 

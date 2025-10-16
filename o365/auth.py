@@ -59,7 +59,7 @@ def device_code_flow():
 
             print("\n✓ Authentication successful!")
             print(f"✓ Tokens saved to {TOKEN_FILE}")
-            print(f"✓ Access token expires in {tokens.get('expires_in', 3600)} seconds\n")
+            print("✓ Tokens will be automatically refreshed as needed\n")
             return tokens
 
         except urllib.error.HTTPError as e:
@@ -131,12 +131,20 @@ def check_status():
     print(f"Access token: {'✓' if has_access else '✗'}")
     print(f"Refresh token: {'✓' if has_refresh else '✗'}")
 
-    # Show expiry if available (tokens usually expire in 1 hour)
-    if 'expires_in' in tokens:
-        # Note: This is from when token was saved, not current time
-        # In production, you'd store a timestamp with the token
-        print(f"\nNote: Access tokens typically expire after 1 hour")
-        print(f"Run 'o365 auth refresh' to get a new access token")
+    # Show token age if available
+    if '_saved_at' in tokens and 'expires_in' in tokens:
+        from time import time
+        saved_at = tokens['_saved_at']
+        expires_in = tokens['expires_in']
+        time_elapsed = time() - saved_at
+        time_remaining = expires_in - time_elapsed
+
+        if time_remaining > 0:
+            minutes_remaining = int(time_remaining / 60)
+            print(f"\nToken valid for: ~{minutes_remaining} minutes")
+            print(f"(Tokens are automatically refreshed before expiration)")
+        else:
+            print(f"\nToken expired (will be auto-refreshed on next command)")
 
     print("\n" + "="*70 + "\n")
 
