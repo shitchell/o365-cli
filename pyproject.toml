@@ -45,9 +45,9 @@ dev = [
 o365 = "o365.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/o365-cli"
-Repository = "https://github.com/yourusername/o365-cli"
-Issues = "https://github.com/yourusername/o365-cli/issues"
+Homepage = "https://github.com/shitchell/o365-cli"
+Repository = "https://github.com/shitchell/o365-cli"
+Issues = "https://github.com/shitchell/o365-cli/issues"
 
 [tool.setuptools]
 packages = ["o365"]
