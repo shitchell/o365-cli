@@ -21,6 +21,12 @@ mail = true
 calendar = true
 contacts = true
 chat = true
+files = true
+
+# Optional: Enable .All scopes for broader access (may require admin consent)
+# These provide access to shared drives/sites, not just personal OneDrive
+files.all = false      # Files.Read.All, Files.ReadWrite.All (shared drives)
+sites.all = false      # Sites.Read.All, Sites.ReadWrite.All (SharePoint sites)
 
 # Option 2: Specify custom scopes (comma-separated)
 # Uncomment and modify to request only specific permissions:

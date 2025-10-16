@@ -34,6 +34,8 @@ DEFAULT_SCOPES = [
     "https://graph.microsoft.com/Chat.Read",
     "https://graph.microsoft.com/Chat.ReadWrite",
     "https://graph.microsoft.com/ChatMessage.Send",
+    "https://graph.microsoft.com/Files.Read",
+    "https://graph.microsoft.com/Files.ReadWrite",
     "https://graph.microsoft.com/User.Read",
     "offline_access"
 ]
@@ -127,6 +129,30 @@ def load_config():
                         "https://graph.microsoft.com/Chat.Read",
                         "https://graph.microsoft.com/Chat.ReadWrite",
                         "https://graph.microsoft.com/ChatMessage.Send"
+                    ])
+
+                # Files scopes: base scopes if files=true OR files.all=true
+                files_enabled = parser.getboolean('scopes', 'files', fallback=True)
+                files_all_enabled = parser.getboolean('scopes', 'files.all', fallback=False)
+
+                if files_enabled or files_all_enabled:
+                    scopes.extend([
+                        "https://graph.microsoft.com/Files.Read",
+                        "https://graph.microsoft.com/Files.ReadWrite"
+                    ])
+
+                    # Optional .All scopes (may require admin consent)
+                    if files_all_enabled:
+                        scopes.extend([
+                            "https://graph.microsoft.com/Files.Read.All",
+                            "https://graph.microsoft.com/Files.ReadWrite.All"
+                        ])
+
+                # Sites scopes: only if sites.all=true
+                if parser.getboolean('scopes', 'sites.all', fallback=False):
+                    scopes.extend([
+                        "https://graph.microsoft.com/Sites.Read.All",
+                        "https://graph.microsoft.com/Sites.ReadWrite.All"
                     ])
 
                 # Always include User.Read and offline_access

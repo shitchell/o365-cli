@@ -7,6 +7,7 @@ A unified command-line interface for managing Office365 email, calendar, and con
 - **Email Management**: Sync, read, archive, and send emails
 - **Calendar**: View and create calendar events, manage invites
 - **Teams Chats**: List, read, send, and search Microsoft Teams chats
+- **OneDrive & SharePoint**: List, search, download, and upload files across personal and shared drives
 - **Contacts**: Search and manage contacts
 - **OAuth2 Authentication**: Secure device code flow authentication
 - **Local Storage**: Maildir format for offline email access
@@ -136,6 +137,40 @@ o365 chat search "bug fix" --with quinn   # Search in quinn's chats
 o365 chat search "meeting" --since "1 week ago"
 ```
 
+### Files Commands
+
+```bash
+# List available drives
+o365 files drives
+o365 files drives -v                   # Show drive IDs and details
+
+# List files
+o365 files list                        # List root of personal OneDrive
+o365 files list /Documents             # List Documents folder
+o365 files list -l --since "1 week ago"     # Recent files with details
+
+# Search files
+o365 files search "quarterly report"
+o365 files search "budget" --type xlsx              # Excel files only
+
+# Download files
+o365 files download /Reports/Q4.xlsx
+o365 files download /Reports/Q4.xlsx ~/Desktop/     # To specific location
+
+# Upload files
+o365 files upload ~/analysis.pdf /Reports/
+```
+
+**Note:** By default, only **personal OneDrive** access is enabled. To access shared drives and SharePoint sites, enable the additional scopes in your config:
+
+```ini
+[scopes]
+files.all = true   # Enable access to shared drives
+sites.all = true   # Enable access to SharePoint sites
+```
+
+These permissions (`Files.Read.All`, `Files.ReadWrite.All`, `Sites.Read.All`, `Sites.ReadWrite.All`) may require admin consent in some organizations. See [Azure App Registration](#azure-app-registration) for details.
+
 ### Contacts Commands
 
 ```bash
@@ -184,6 +219,11 @@ mail = true
 calendar = true
 contacts = true
 chat = true
+files = true
+
+# Optional: Enable .All scopes for shared drives/sites (may require admin consent)
+files.all = false      # Access shared drives (Files.Read.All, Files.ReadWrite.All)
+sites.all = false      # Access SharePoint sites (Sites.Read.All, Sites.ReadWrite.All)
 
 [paths]
 # Optional: customize storage locations
@@ -224,11 +264,19 @@ To use this tool, you need to register an application in Azure Active Directory:
    - `ChatMessage.Send`
    - `Contacts.Read`
    - `Contacts.ReadWrite`
+   - `Files.Read`
+   - `Files.ReadWrite`
    - `Mail.ReadWrite`
    - `Mail.Send`
    - `MailboxSettings.Read`
    - `User.Read`
    - `offline_access`
+
+   **Optional (for shared drives/SharePoint, may require admin consent):**
+   - `Files.Read.All`
+   - `Files.ReadWrite.All`
+   - `Sites.Read.All`
+   - `Sites.ReadWrite.All`
 
 4. Copy the **Application (client) ID** and **Directory (tenant) ID** to your config file
 
@@ -245,6 +293,7 @@ mail = true
 calendar = false
 contacts = false
 chat = false
+files = false
 ```
 
 ### Additional Configuration (Mail Sending)
