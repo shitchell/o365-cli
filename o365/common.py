@@ -195,16 +195,48 @@ def load_tokens():
 
 
 def save_tokens(tokens):
-    """Save OAuth2 tokens to file"""
+    """Save OAuth2 tokens to file with timestamp"""
     # Create directory if it doesn't exist
     TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # Add timestamp for expiry tracking
+    from time import time
+    tokens['_saved_at'] = time()
+
     TOKEN_FILE.write_text(json.dumps(tokens, indent=2))
     TOKEN_FILE.chmod(0o600)
 
 
 def get_access_token():
-    """Get the current access token"""
+    """Get the current access token, automatically refreshing if expired"""
     tokens = load_tokens()
+
+    # Check if token is expired or close to expiring (within 5 minutes)
+    if '_saved_at' in tokens and 'expires_in' in tokens:
+        from time import time
+        saved_at = tokens['_saved_at']
+        expires_in = tokens['expires_in']
+        time_elapsed = time() - saved_at
+        time_remaining = expires_in - time_elapsed
+
+        # If token expires in less than 5 minutes, refresh it
+        if time_remaining < 300:  # 5 minutes buffer
+            if tokens.get('refresh_token'):
+                try:
+                    # Attempt to refresh
+                    new_tokens = make_oauth_request('/token', {
+                        'client_id': CLIENT_ID,
+                        'grant_type': 'refresh_token',
+                        'refresh_token': tokens['refresh_token'],
+                        'scope': ' '.join(SCOPES)
+                    })
+                    save_tokens(new_tokens)
+                    tokens = new_tokens
+                except Exception:
+                    # If refresh fails, continue with existing token
+                    # (it might still work, or command will fail with proper error)
+                    pass
+
     access_token = tokens.get('access_token')
 
     if not access_token:
