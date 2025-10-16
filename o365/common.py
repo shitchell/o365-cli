@@ -31,6 +31,9 @@ DEFAULT_SCOPES = [
     "https://graph.microsoft.com/Mail.ReadWrite",
     "https://graph.microsoft.com/Mail.Send",
     "https://graph.microsoft.com/MailboxSettings.Read",
+    "https://graph.microsoft.com/Chat.Read",
+    "https://graph.microsoft.com/Chat.ReadWrite",
+    "https://graph.microsoft.com/ChatMessage.Send",
     "https://graph.microsoft.com/User.Read",
     "offline_access"
 ]
@@ -117,6 +120,13 @@ def load_config():
                     scopes.extend([
                         "https://graph.microsoft.com/Contacts.Read",
                         "https://graph.microsoft.com/Contacts.ReadWrite"
+                    ])
+
+                if parser.getboolean('scopes', 'chat', fallback=True):
+                    scopes.extend([
+                        "https://graph.microsoft.com/Chat.Read",
+                        "https://graph.microsoft.com/Chat.ReadWrite",
+                        "https://graph.microsoft.com/ChatMessage.Send"
                     ])
 
                 # Always include User.Read and offline_access

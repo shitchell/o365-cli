@@ -20,6 +20,7 @@ def main():
 Examples:
   o365 mail read --unread          # Read unread emails
   o365 calendar list --today       # Show today's calendar
+  o365 chat list --with quinn      # List chats with quinn
   o365 contacts search quinn       # Search for a contact
   o365 auth status                 # Check authentication status
 
@@ -44,17 +45,22 @@ For more help on a specific command:
     contacts_parser = subparsers.add_parser('contacts', help='Manage contacts and user directory')
     contacts_subparsers = contacts_parser.add_subparsers(dest='contacts_command', help='Contacts operations')
 
+    # Chat commands
+    chat_parser = subparsers.add_parser('chat', help='Manage Teams chats')
+    chat_subparsers = chat_parser.add_subparsers(dest='chat_command', help='Chat operations')
+
     # Auth commands
     auth_parser = subparsers.add_parser('auth', help='Manage OAuth2 authentication')
     auth_subparsers = auth_parser.add_subparsers(dest='auth_command', help='Authentication operations')
 
     # Import and setup subcommands (lazy import to avoid loading all modules at startup)
-    from . import mail, calendar, contacts, auth
+    from . import mail, calendar, contacts, chat, auth
 
     # Setup each command group's subparsers
     mail.setup_parser(mail_subparsers)
     calendar.setup_parser(calendar_subparsers)
     contacts.setup_parser(contacts_subparsers)
+    chat.setup_parser(chat_subparsers)
     auth.setup_parser(auth_subparsers)
 
     # Parse arguments
@@ -83,6 +89,12 @@ For more help on a specific command:
             contacts_parser.print_help()
             sys.exit(1)
         contacts.handle_command(args)
+
+    elif args.command == 'chat':
+        if not args.chat_command:
+            chat_parser.print_help()
+            sys.exit(1)
+        chat.handle_command(args)
 
     elif args.command == 'auth':
         if not args.auth_command:

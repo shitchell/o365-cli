@@ -5,7 +5,8 @@ A unified command-line interface for managing Office365 email, calendar, and con
 ## Features
 
 - **Email Management**: Sync, read, archive, and send emails
-- **Calendar**: View your calendar and others' shared calendars
+- **Calendar**: View and create calendar events, manage invites
+- **Teams Chats**: List, read, send, and search Microsoft Teams chats
 - **Contacts**: Search and manage contacts
 - **OAuth2 Authentication**: Secure device code flow authentication
 - **Local Storage**: Maildir format for offline email access
@@ -112,6 +113,29 @@ o365 calendar list --user quinn --today
 o365 calendar list --user roman --week
 ```
 
+### Chat Commands
+
+```bash
+# List chats
+o365 chat list
+o365 chat list --with quinn            # Filter to chats with quinn
+o365 chat list --since "2 days ago"    # Recent chats
+
+# Read messages
+o365 chat read <chat-id>
+o365 chat read --with quinn            # Read chat with quinn
+o365 chat read --with "Project Team"   # Read group chat
+
+# Send messages
+o365 chat send --to quinn -m "Quick question"
+o365 chat send --chat <chat-id> -m "Message here"
+
+# Search messages
+o365 chat search "deployment"
+o365 chat search "bug fix" --with quinn   # Search in quinn's chats
+o365 chat search "meeting" --since "1 week ago"
+```
+
 ### Contacts Commands
 
 ```bash
@@ -159,6 +183,7 @@ tenant = your-azure-ad-tenant-id
 mail = true
 calendar = true
 contacts = true
+chat = true
 
 [paths]
 # Optional: customize storage locations
@@ -194,6 +219,9 @@ To use this tool, you need to register an application in Azure Active Directory:
    - `Calendars.Read`
    - `Calendars.ReadWrite`
    - `Calendars.ReadWrite.Shared`
+   - `Chat.Read`
+   - `Chat.ReadWrite`
+   - `ChatMessage.Send`
    - `Contacts.Read`
    - `Contacts.ReadWrite`
    - `Mail.ReadWrite`
@@ -204,6 +232,11 @@ To use this tool, you need to register an application in Azure Active Directory:
 
 4. Copy the **Application (client) ID** and **Directory (tenant) ID** to your config file
 
+**Important**: After adding new permissions to your Azure AD app or changing scopes in your config file, you must re-authenticate:
+```bash
+o365 auth login
+```
+
 **Note**: You can request fewer permissions if you only need specific features. For example, for mail-only access:
 
 ```ini
@@ -211,6 +244,7 @@ To use this tool, you need to register an application in Azure Active Directory:
 mail = true
 calendar = false
 contacts = false
+chat = false
 ```
 
 ### Additional Configuration (Mail Sending)

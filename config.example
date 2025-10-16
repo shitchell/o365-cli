@@ -20,6 +20,7 @@ tenant = your-azure-ad-tenant-id
 mail = true
 calendar = true
 contacts = true
+chat = true
 
 # Option 2: Specify custom scopes (comma-separated)
 # Uncomment and modify to request only specific permissions:
