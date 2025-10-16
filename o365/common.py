@@ -87,7 +87,11 @@ def make_graph_request(url, access_token, method="GET", data=None):
 
     try:
         with urllib.request.urlopen(req) as response:
-            return json.loads(response.read())
+            body = response.read()
+            # DELETE requests typically return empty responses
+            if not body:
+                return {}
+            return json.loads(body)
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()
         print(f"Graph API Error: {e.code} - {error_body}", file=sys.stderr)

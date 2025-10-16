@@ -127,6 +127,138 @@ def resolve_user(user_query, access_token):
     return matches[0]['email']
 
 
+def parse_duration(duration_str):
+    """Parse duration string like '1h', '30m', '1h30m' into timedelta
+
+    Supports formats like:
+    - 30m, 1h, 2h30m
+    - 1.5h (decimal hours)
+    - Combinations: 1h 30m
+    """
+    if not duration_str:
+        return None
+
+    duration_str = duration_str.lower().strip()
+    total_seconds = 0
+
+    # Try simple decimal hours first (e.g., "1.5h")
+    decimal_match = re.match(r'^([\d.]+)h?$', duration_str)
+    if decimal_match and '.' in decimal_match.group(1):
+        hours = float(decimal_match.group(1))
+        return timedelta(hours=hours)
+
+    # Parse hour and minute components
+    hour_match = re.search(r'(\d+)\s*h', duration_str)
+    min_match = re.search(r'(\d+)\s*m', duration_str)
+
+    if hour_match:
+        total_seconds += int(hour_match.group(1)) * 3600
+    if min_match:
+        total_seconds += int(min_match.group(1)) * 60
+
+    if total_seconds == 0:
+        raise ValueError(f"Invalid duration format: '{duration_str}'. Use formats like '1h', '30m', '1h30m'")
+
+    return timedelta(seconds=total_seconds)
+
+
+def create_event(access_token, title, start_time, duration, required_attendees=None,
+                 optional_attendees=None, description=None, location=None, online_meeting=False):
+    """Create a calendar event via Microsoft Graph API
+
+    Args:
+        access_token: OAuth2 access token
+        title: Event subject/title
+        start_time: datetime object for event start (timezone-aware)
+        duration: timedelta object for event duration
+        required_attendees: List of email addresses (required attendees)
+        optional_attendees: List of email addresses (optional attendees)
+        description: Event body/description
+        location: Event location string
+        online_meeting: If True, create as Teams online meeting
+
+    Returns:
+        Created event object from Graph API
+    """
+    # Calculate end time
+    end_time = start_time + duration
+
+    # Convert to UTC for Graph API
+    start_utc = start_time.astimezone(timezone.utc)
+    end_utc = end_time.astimezone(timezone.utc)
+
+    # Build event payload
+    event = {
+        'subject': title,
+        'start': {
+            'dateTime': start_utc.strftime('%Y-%m-%dT%H:%M:%S'),
+            'timeZone': 'UTC'
+        },
+        'end': {
+            'dateTime': end_utc.strftime('%Y-%m-%dT%H:%M:%S'),
+            'timeZone': 'UTC'
+        }
+    }
+
+    # Add attendees
+    attendees = []
+    if required_attendees:
+        for email in required_attendees:
+            attendees.append({
+                'emailAddress': {'address': email},
+                'type': 'required'
+            })
+    if optional_attendees:
+        for email in optional_attendees:
+            attendees.append({
+                'emailAddress': {'address': email},
+                'type': 'optional'
+            })
+
+    if attendees:
+        event['attendees'] = attendees
+
+    # Add description
+    if description:
+        event['body'] = {
+            'contentType': 'text',
+            'content': description
+        }
+
+    # Add location
+    if location:
+        event['location'] = {
+            'displayName': location
+        }
+
+    # Add online meeting
+    if online_meeting:
+        event['isOnlineMeeting'] = True
+        event['onlineMeetingProvider'] = 'teamsForBusiness'
+
+    # Create the event
+    url = f"{GRAPH_API_BASE}/me/events"
+    result = make_graph_request(url, access_token, method='POST', data=event)
+
+    return result
+
+
+def delete_event(access_token, event_id):
+    """Delete a calendar event by ID
+
+    Args:
+        access_token: OAuth2 access token
+        event_id: Event ID to delete
+
+    Returns:
+        True if successful, False otherwise
+    """
+    url = f"{GRAPH_API_BASE}/me/events/{event_id}"
+    # DELETE returns empty body on success, {} on success, None on error
+    result = make_graph_request(url, access_token, method='DELETE')
+    return result is not None
+
+
 def get_calendar_id_for_user(email, access_token):
     """Get the calendar ID for a shared calendar by owner email"""
     url = f"{GRAPH_API_BASE}/me/calendars"
@@ -300,6 +432,96 @@ def cmd_list(args):
     display_events(events, start_date, end_date, user_email)
 
 
+def cmd_create(args):
+    """Handle 'o365 calendar create' command"""
+    access_token = get_access_token()
+
+    # Parse the start time
+    try:
+        start_time = parse_since_expression(args.when)
+    except ValueError as e:
+        print(f"Error in --when: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Parse duration (default to 1 hour)
+    try:
+        duration = parse_duration(args.duration or "1h")
+    except ValueError as e:
+        print(f"Error in --duration: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve required attendees
+    required_attendees = []
+    if args.required:
+        for user_query in args.required:
+            email = resolve_user(user_query, access_token)
+            required_attendees.append(email)
+
+    # Resolve optional attendees
+    optional_attendees = []
+    if args.optional:
+        for user_query in args.optional:
+            email = resolve_user(user_query, access_token)
+            optional_attendees.append(email)
+
+    # Create the event
+    print(f"Creating event '{args.title}'...")
+
+    event = create_event(
+        access_token,
+        title=args.title,
+        start_time=start_time,
+        duration=duration,
+        required_attendees=required_attendees if required_attendees else None,
+        optional_attendees=optional_attendees if optional_attendees else None,
+        description=args.description,
+        location=args.location,
+        online_meeting=args.online_meeting
+    )
+
+    if not event:
+        print("Error: Failed to create event", file=sys.stderr)
+        sys.exit(1)
+
+    # Display confirmation
+    end_time = start_time + duration
+    print(f"\nEvent created successfully!")
+    print(f"  Title: {args.title}")
+    print(f"  When: {start_time.strftime('%Y-%m-%d %H:%M')} - {end_time.strftime('%H:%M')} (local time)")
+    print(f"  Duration: {args.duration or '1h'}")
+
+    if required_attendees:
+        print(f"  Required attendees: {', '.join(required_attendees)}")
+    if optional_attendees:
+        print(f"  Optional attendees: {', '.join(optional_attendees)}")
+    if args.location:
+        print(f"  Location: {args.location}")
+    if args.online_meeting:
+        print(f"  Teams meeting: Yes")
+        if event.get('onlineMeeting', {}).get('joinUrl'):
+            print(f"  Join URL: {event['onlineMeeting']['joinUrl']}")
+    if args.description:
+        print(f"  Description: {args.description}")
+
+    print(f"\nEvent ID: {event.get('id')}")
+
+
+def cmd_delete(args):
+    """Handle 'o365 calendar delete' command"""
+    access_token = get_access_token()
+
+    for event_id in args.event_ids:
+        print(f"Deleting event {event_id}...")
+
+        success = delete_event(access_token, event_id)
+
+        if success:
+            print(f"  Event deleted successfully")
+        else:
+            print(f"  Error: Failed to delete event", file=sys.stderr)
+            sys.exit(1)
+
+
 # Setup and routing
 
 def setup_parser(subparsers):
@@ -357,6 +579,84 @@ Examples:
     # list_parser.add_argument('--location', type=str, help='Filter by location regex')
 
     list_parser.set_defaults(func=cmd_list)
+
+    # o365 calendar create
+    create_parser = subparsers.add_parser(
+        'create',
+        help='Create a calendar event',
+        description='Create a new calendar event in Office365.',
+        epilog="""
+Time Format:
+  All time expressions support git-style formats:
+    - Relative: "2 hours", "tomorrow at 3pm", "next monday at 10am"
+    - Absolute: "2025-10-15 14:00", "December 20, 2024 at 9am"
+    - Times without dates default to today
+
+Duration Format:
+  Supports flexible duration formats:
+    - Hours: "1h", "2h", "1.5h"
+    - Minutes: "30m", "45m"
+    - Combined: "1h30m", "2h 15m"
+
+Examples:
+  # Simple event
+  o365 calendar create -t "Team Meeting" -w "tomorrow at 2pm" -d 1h
+
+  # With attendees
+  o365 calendar create -t "Sprint Planning" -w "next monday at 10am" -d 2h \\
+    -r quinn -r roman -o smith
+
+  # With location and description
+  o365 calendar create -t "Client Review" -w "2025-02-20 14:00" -d 1h30m \\
+    -l "Conference Room A" -D "Q1 review with client"
+
+  # Teams online meeting
+  o365 calendar create -t "Standup" -w "tomorrow at 9am" -d 30m \\
+    -r team@example.com --online-meeting
+"""
+    )
+
+    # Required arguments
+    create_parser.add_argument('-t', '--title', type=str, required=True,
+                              help='Event title/subject (required)')
+    create_parser.add_argument('-w', '--when', type=str, required=True,
+                              help='When the event occurs (required, git-style format)')
+
+    # Optional arguments
+    create_parser.add_argument('-d', '--duration', type=str, metavar='DURATION',
+                              help='Event duration (default: 1h, format: "1h", "30m", "1h30m")')
+    create_parser.add_argument('-r', '--required', type=str, action='append', metavar='USER',
+                              help='Required attendee (name, email, or user ID, can be used multiple times)')
+    create_parser.add_argument('-o', '--optional', type=str, action='append', metavar='USER',
+                              help='Optional attendee (name, email, or user ID, can be used multiple times)')
+    create_parser.add_argument('-D', '--description', type=str,
+                              help='Event description/body')
+    create_parser.add_argument('-l', '--location', type=str,
+                              help='Event location')
+    create_parser.add_argument('--online-meeting', action='store_true',
+                              help='Create as Teams online meeting')
+
+    create_parser.set_defaults(func=cmd_create)
+
+    # o365 calendar delete
+    delete_parser = subparsers.add_parser(
+        'delete',
+        help='Delete a calendar event',
+        description='Delete one or more calendar events by ID.',
+        epilog="""
+Examples:
+  # Delete single event
+  o365 calendar delete AAMkADFhY2VlZWU4LWMxMTItNGRiYy04ZjlkLTc3ZmRhYmQwNTI4MA...
+
+  # Delete multiple events
+  o365 calendar delete EVENT_ID1 EVENT_ID2 EVENT_ID3
+"""
+    )
+
+    delete_parser.add_argument('event_ids', nargs='+', metavar='EVENT_ID',
+                              help='One or more event IDs to delete')
+
+    delete_parser.set_defaults(func=cmd_delete)
 
 
 def handle_command(args):
