@@ -633,8 +633,10 @@ Examples:
                               help='Event description/body')
     create_parser.add_argument('-l', '--location', type=str,
                               help='Event location')
-    create_parser.add_argument('--online-meeting', action='store_true',
-                              help='Create as Teams online meeting')
+    create_parser.add_argument('--online-meeting', action='store_true', default=True,
+                              help='Create as Teams online meeting (default: True)')
+    create_parser.add_argument('--no-online-meeting', dest='online_meeting', action='store_false',
+                              help='Create as regular in-person event (disables Teams meeting)')
 
     create_parser.set_defaults(func=cmd_create)
 
