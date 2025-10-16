@@ -549,8 +549,8 @@ Examples:
   o365 calendar list --week                           # This week's events
   o365 calendar list --after "3 days ago"             # Events from last 3 days
   o365 calendar list --after "2025-10-01" --before "2025-10-15"  # Date range
-  o365 calendar list --user quinn --today             # View Quinn's calendar
-  o365 calendar list --user roman --week              # View Roman's calendar
+  o365 calendar list --user john --today              # View John's calendar
+  o365 calendar list --user john --week               # View John's calendar
 """
     )
 
@@ -604,7 +604,7 @@ Examples:
 
   # With attendees
   o365 calendar create -t "Sprint Planning" -w "next monday at 10am" -d 2h \\
-    -r quinn -r roman -o smith
+    -r john -r jane -o smith
 
   # With location and description
   o365 calendar create -t "Client Review" -w "2025-02-20 14:00" -d 1h30m \\

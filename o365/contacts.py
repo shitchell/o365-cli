@@ -170,13 +170,13 @@ def setup_parser(subparsers):
         description='Search for contacts by name or email.',
         epilog="""
 Examples:
-  o365 contacts search quinn                  # Search for "quinn"
-  o365 contacts search roman.minajew@trinoor.com  # Search by email
-  o365 contacts search quinn --resolve        # Get email only (script-friendly)
+  o365 contacts search john                   # Search for "john"
+  o365 contacts search john.doe@example.com   # Search by email
+  o365 contacts search john --resolve         # Get email only (script-friendly)
 
 Notes:
   - Searches both personal contacts and shared calendar owners
-  - Detects ambiguous matches (e.g., "shaun" matches multiple users)
+  - Detects ambiguous matches (e.g., "john" matches multiple users)
   - Use --resolve in scripts to ensure single result
 """
     )

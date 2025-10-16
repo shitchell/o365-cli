@@ -329,12 +329,12 @@ Options:
 Examples:
   o365 recordings list                              # Recent recordings
   o365 recordings list --since "2 weeks ago"        # Last 2 weeks
-  o365 recordings list --organizer quinn            # Quinn's meetings
+  o365 recordings list --organizer john             # John's meetings
   o365 recordings list -n 100 --since "1 month ago" # Last 100 from past month
 
 Output format:
   ID           Date                Meeting Name              Organizer       Duration
-  abc123...    2025-10-15 14:00    Sprint Planning           Quinn Gribben   1h 30m
+  abc123...    2025-10-15 14:00    Sprint Planning           John Doe        1h 30m
 ```
 
 ### `o365 recordings search`
@@ -355,8 +355,8 @@ Options:
 Examples:
   o365 recordings search "sprint planning"                 # By meeting name
   o365 recordings search "architecture" --since "1 month"  # Recent arch meetings
-  o365 recordings search "review" --organizer quinn        # Quinn's review meetings
-  o365 recordings search "demo" --attendee roman           # Demos with Roman
+  o365 recordings search "review" --organizer john         # John's review meetings
+  o365 recordings search "demo" --attendee jane            # Demos with Jane
 
 Output shows:
   - Recording ID (for download/transcript commands)
@@ -411,8 +411,8 @@ Examples:
   o365 recordings transcript abc123 --timestamps --speakers  # Full details
 
 Output shows:
-  [00:01:23] Quinn Gribben: Let's start with the sprint review
-  [00:02:45] Shaun Mitchell: I completed the authentication feature
+  [00:01:23] John Doe: Let's start with the sprint review
+  [00:02:45] Jane Smith: I completed the authentication feature
   ...
 ```
 

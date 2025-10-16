@@ -111,8 +111,8 @@ o365 calendar list --week
 o365 calendar list --after "3 days ago"
 
 # View someone else's calendar
-o365 calendar list --user quinn --today
-o365 calendar list --user roman --week
+o365 calendar list --user john --today
+o365 calendar list --user john --week
 ```
 
 ### Chat Commands
@@ -120,21 +120,21 @@ o365 calendar list --user roman --week
 ```bash
 # List chats
 o365 chat list
-o365 chat list --with quinn            # Filter to chats with quinn
+o365 chat list --with john            # Filter to chats with john
 o365 chat list --since "2 days ago"    # Recent chats
 
 # Read messages
 o365 chat read <chat-id>
-o365 chat read --with quinn            # Read chat with quinn
+o365 chat read --with john            # Read chat with john
 o365 chat read --with "Project Team"   # Read group chat
 
 # Send messages
-o365 chat send --to quinn -m "Quick question"
+o365 chat send --to john -m "Quick question"
 o365 chat send --chat <chat-id> -m "Message here"
 
 # Search messages
 o365 chat search "deployment"
-o365 chat search "bug fix" --with quinn   # Search in quinn's chats
+o365 chat search "bug fix" --with john   # Search in john's chats
 o365 chat search "meeting" --since "1 week ago"
 ```
 
@@ -207,11 +207,11 @@ o365 recordings info <recording-id>
 o365 contacts list
 
 # Search for contacts
-o365 contacts search quinn
+o365 contacts search john
 o365 contacts search john@example.com
 
 # Resolve contact (for scripting)
-o365 contacts search quinn --resolve
+o365 contacts search john --resolve
 ```
 
 ### Authentication Commands

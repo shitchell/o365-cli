@@ -20,10 +20,10 @@ def main():
 Examples:
   o365 mail read --unread             # Read unread emails
   o365 calendar list --today          # Show today's calendar
-  o365 chat list --with quinn         # List chats with quinn
+  o365 chat list --with john          # List chats with john
   o365 files list /Documents          # List files in Documents
   o365 recordings list --since "1 week ago"  # List recent recordings
-  o365 contacts search quinn          # Search for a contact
+  o365 contacts search john           # Search for a contact
   o365 auth status                    # Check authentication status
 
 For more help on a specific command:
