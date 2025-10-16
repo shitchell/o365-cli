@@ -8,6 +8,7 @@ A unified command-line interface for managing Office365 email, calendar, and con
 - **Calendar**: View and create calendar events, manage invites
 - **Teams Chats**: List, read, send, and search Microsoft Teams chats
 - **OneDrive & SharePoint**: List, search, download, and upload files across personal and shared drives
+- **Meeting Recordings**: List, search, download, and view transcripts of Teams meeting recordings
 - **Contacts**: Search and manage contacts
 - **OAuth2 Authentication**: Secure device code flow authentication
 - **Local Storage**: Maildir format for offline email access
@@ -170,6 +171,34 @@ sites.all = true   # Enable access to SharePoint sites
 ```
 
 These permissions (`Files.Read.All`, `Files.ReadWrite.All`, `Sites.Read.All`, `Sites.ReadWrite.All`) may require admin consent in some organizations. See [Azure App Registration](#azure-app-registration) for details.
+
+### Recordings Commands
+
+```bash
+# List recordings
+o365 recordings list
+o365 recordings list --since "1 week ago"     # Recent recordings
+o365 recordings list -n 100                   # Last 100 recordings
+
+# Search recordings
+o365 recordings search "sprint planning"
+o365 recordings search "review" --since "1 month ago"
+
+# Download recording
+o365 recordings download <recording-id>
+o365 recordings download <recording-id> ~/Videos/
+
+# View transcript
+o365 recordings transcript <recording-id>
+o365 recordings transcript <recording-id> --output notes.txt
+o365 recordings transcript <recording-id> --format vtt
+o365 recordings transcript <recording-id> --timestamps --speakers
+
+# Get recording info
+o365 recordings info <recording-id>
+```
+
+**Note:** Recordings commands require **Files** permissions to be enabled (recordings are stored in OneDrive). Use `o365 recordings list` or `o365 recordings search` to get recording IDs.
 
 ### Contacts Commands
 

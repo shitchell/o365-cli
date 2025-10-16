@@ -7,14 +7,11 @@
 - ✅ Contacts management (list, search)
 - ✅ Chat management (list, read, send, search)
 - ✅ OneDrive/Files management (drives, list, search, download, upload) - **Personal OneDrive only**
+- ✅ Meeting Recordings (list, search, download, transcript, info)
 - ✅ Authentication (login, refresh, status with auto-refresh)
 - ✅ Configuration system (config file + env vars)
 - ✅ Automatic token refresh (5-minute buffer)
 - ✅ User-friendly error messages
-
-## In Progress 🚧
-
-### 1. Meeting Recordings
 
 ## Known Limitations ⚠️
 

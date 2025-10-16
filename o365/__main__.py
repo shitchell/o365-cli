@@ -18,12 +18,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  o365 mail read --unread          # Read unread emails
-  o365 calendar list --today       # Show today's calendar
-  o365 chat list --with quinn      # List chats with quinn
-  o365 files list /Documents       # List files in Documents
-  o365 contacts search quinn       # Search for a contact
-  o365 auth status                 # Check authentication status
+  o365 mail read --unread             # Read unread emails
+  o365 calendar list --today          # Show today's calendar
+  o365 chat list --with quinn         # List chats with quinn
+  o365 files list /Documents          # List files in Documents
+  o365 recordings list --since "1 week ago"  # List recent recordings
+  o365 contacts search quinn          # Search for a contact
+  o365 auth status                    # Check authentication status
 
 For more help on a specific command:
   o365 <command> --help
@@ -54,12 +55,16 @@ For more help on a specific command:
     files_parser = subparsers.add_parser('files', help='Manage OneDrive and SharePoint files')
     files_subparsers = files_parser.add_subparsers(dest='files_command', help='File operations')
 
+    # Recordings commands
+    recordings_parser = subparsers.add_parser('recordings', help='Manage Teams meeting recordings')
+    recordings_subparsers = recordings_parser.add_subparsers(dest='recordings_command', help='Recording operations')
+
     # Auth commands
     auth_parser = subparsers.add_parser('auth', help='Manage OAuth2 authentication')
     auth_subparsers = auth_parser.add_subparsers(dest='auth_command', help='Authentication operations')
 
     # Import and setup subcommands (lazy import to avoid loading all modules at startup)
-    from . import mail, calendar, contacts, chat, files, auth
+    from . import mail, calendar, contacts, chat, files, recordings, auth
 
     # Setup each command group's subparsers
     mail.setup_parser(mail_subparsers)
@@ -67,6 +72,7 @@ For more help on a specific command:
     contacts.setup_parser(contacts_subparsers)
     chat.setup_parser(chat_subparsers)
     files.setup_parser(files_subparsers)
+    recordings.setup_parser(recordings_subparsers)
     auth.setup_parser(auth_subparsers)
 
     # Parse arguments
@@ -107,6 +113,12 @@ For more help on a specific command:
             files_parser.print_help()
             sys.exit(1)
         files.handle_command(args)
+
+    elif args.command == 'recordings':
+        if not args.recordings_command:
+            recordings_parser.print_help()
+            sys.exit(1)
+        recordings.handle_command(args)
 
     elif args.command == 'auth':
         if not args.auth_command:
