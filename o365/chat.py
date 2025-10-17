@@ -431,6 +431,23 @@ def cmd_search(args):
             print(f"No chats found with '{args.with_user}'")
             return
 
+    # Resolve --from user if specified
+    from_user = None
+    if args.from_user:
+        matches = search_users(args.from_user, access_token)
+
+        if not matches:
+            print(f"Error: No user found matching '{args.from_user}'", file=sys.stderr)
+            sys.exit(1)
+
+        if len(matches) > 1:
+            print(f"Error: Ambiguous --from '{args.from_user}' matches {len(matches)} users:", file=sys.stderr)
+            for match in matches:
+                print(f"  - {match['name']} ({match['email']})", file=sys.stderr)
+            sys.exit(1)
+
+        from_user = matches[0]
+
     # Parse --since filter
     since_date = None
     if args.since:
@@ -443,8 +460,28 @@ def cmd_search(args):
     # Search messages
     results = search_messages(access_token, args.query, chats=chats, count=args.count or 50, since=since_date)
 
+    # Filter by --from user if specified
+    if from_user:
+        filtered_results = []
+        from_email = from_user['email'].lower()
+        from_name = from_user['name'].lower()
+
+        for chat, msg in results:
+            sender_info = msg.get('from', {}).get('user', {})
+            sender_email = sender_info.get('userPrincipalName', '').lower()
+            sender_name = sender_info.get('displayName', '').lower()
+
+            # Match by email or name
+            if sender_email == from_email or sender_name == from_name:
+                filtered_results.append((chat, msg))
+
+        results = filtered_results
+
     if not results:
-        print(f"No messages found matching '{args.query}'")
+        if args.from_user:
+            print(f"No messages found matching '{args.query}' from {from_user['name']}")
+        else:
+            print(f"No messages found matching '{args.query}'")
         return
 
     # Display results
@@ -542,6 +579,8 @@ def setup_parser(subparsers):
     search_parser.add_argument('query', help='Search query string')
     search_parser.add_argument('--with', dest='with_user', type=str, metavar='USER',
                               help='Search only chats with specific user or group chat name')
+    search_parser.add_argument('--from', dest='from_user', type=str, metavar='USER',
+                              help='Filter messages from specific user (name or email)')
     search_parser.add_argument('--since', type=str, metavar='EXPR',
                               help='Search messages since this time (git-style format)')
     search_parser.add_argument('-n', '--count', type=int, metavar='N',
