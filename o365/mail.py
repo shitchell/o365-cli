@@ -6,7 +6,13 @@ Sync, read, archive, mark read, and send emails.
 
 import sys
 import subprocess
+import re
+import html2text
 from pathlib import Path
+from datetime import datetime
+
+from .common import get_access_token, make_graph_request, GRAPH_API_BASE
+from .calendar import parse_since_expression
 
 # For now, some commands are implemented by calling existing scripts
 # Later we can refactor these into pure Python if needed
@@ -14,9 +20,160 @@ from pathlib import Path
 # Mail storage location
 MAILDIR_BASE = Path.home() / ".mail" / "office365"
 
+# Get local timezone
+LOCAL_TZ = datetime.now().astimezone().tzinfo
+
+
+def parse_graph_datetime(dt_str):
+    """Parse Microsoft Graph datetime format"""
+    import re
+    # Remove excess fractional seconds (keep max 6 digits)
+    dt_str = re.sub(r'\.(\d{6})\d*', r'.\1', dt_str)
+    # Handle timezone
+    if not dt_str.endswith('Z') and '+' not in dt_str and '-' not in dt_str[-6:]:
+        dt_str += 'Z'
+    return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+
+
+def get_messages(access_token, folder='Inbox', count=10, since=None, unread=None, search=None):
+    """Get messages from a mail folder
+
+    Args:
+        access_token: OAuth2 access token
+        folder: Folder name (default: Inbox)
+        count: Maximum number of messages
+        since: Optional datetime to filter messages after
+        unread: Optional filter for unread (True), read (False), or all (None)
+        search: Optional search query
+
+    Returns:
+        List of message objects
+    """
+    # Build URL
+    url = f"{GRAPH_API_BASE}/me/mailFolders/{folder}/messages"
+
+    # Build query parameters
+    params = {
+        '$top': str(count),
+        '$orderby': 'receivedDateTime desc',
+        '$select': 'id,subject,from,receivedDateTime,isRead,body,bodyPreview'
+    }
+
+    # Add filters
+    filters = []
+    if since:
+        since_str = since.strftime('%Y-%m-%dT%H:%M:%SZ')
+        filters.append(f"receivedDateTime ge {since_str}")
+    if unread is not None:
+        filters.append(f"isRead eq {str(not unread).lower()}")
+    if search:
+        # Use $search for full-text search across subject, body, etc.
+        params['$search'] = f'"{search}"'
+
+    if filters:
+        params['$filter'] = ' and '.join(filters)
+
+    # Build query string
+    import urllib.parse
+    query_string = urllib.parse.urlencode(params)
+    url = f"{url}?{query_string}"
+
+    # Fetch messages with pagination
+    messages = []
+    while url:
+        result = make_graph_request(url, access_token)
+        if not result:
+            break
+
+        messages.extend(result.get('value', []))
+
+        # Check for pagination
+        url = result.get('@odata.nextLink')
+
+        # Respect count limit
+        if len(messages) >= count:
+            messages = messages[:count]
+            break
+
+    return messages
+
+
+def display_message_list(messages):
+    """Display a list of messages in tabular format"""
+    if not messages:
+        print("No messages found")
+        return
+
+    print(f"\n📧 Messages ({len(messages)} shown):\n")
+    print(f"{'#':<4} {'Date':<12} {'From':<30} {'Subject':<50}")
+    print("=" * 100)
+
+    for i, msg in enumerate(messages, 1):
+        # Parse date
+        received = parse_graph_datetime(msg['receivedDateTime']).astimezone(LOCAL_TZ)
+        date_str = received.strftime('%Y-%m-%d')
+
+        # Get sender
+        from_field = msg.get('from', {}).get('emailAddress', {})
+        sender = from_field.get('name') or from_field.get('address', 'Unknown')
+
+        # Get subject
+        subject = msg.get('subject', '(No subject)')
+
+        # Mark unread with indicator
+        unread_mark = '●' if not msg.get('isRead', True) else ' '
+
+        print(f"{i:<4} {date_str:<12} {sender[:28]:<30} {unread_mark} {subject[:48]:<50}")
+
+    print(f"\nUse message ID or number to read a specific message")
+
+
+def display_message(msg, html=False):
+    """Display a single message with full details"""
+    # Parse date
+    received = parse_graph_datetime(msg['receivedDateTime']).astimezone(LOCAL_TZ)
+    date_str = received.strftime('%Y-%m-%d %H:%M:%S')
+
+    # Get sender
+    from_field = msg.get('from', {}).get('emailAddress', {})
+    sender_name = from_field.get('name', '')
+    sender_email = from_field.get('address', '')
+    sender = f"{sender_name} <{sender_email}>" if sender_name else sender_email
+
+    # Get recipients
+    to_addresses = msg.get('toRecipients', [])
+    to_list = [r.get('emailAddress', {}).get('address', '') for r in to_addresses]
+    to_str = ', '.join(to_list)
+
+    # Print header
+    print("\n" + "=" * 80)
+    print(f"From:    {sender}")
+    print(f"To:      {to_str}")
+    print(f"Date:    {date_str}")
+    print(f"Subject: {msg.get('subject', '(No subject)')}")
+    print(f"ID:      {msg['id']}")
+    print("=" * 80 + "\n")
+
+    # Print body
+    body = msg.get('body', {})
+    content_type = body.get('contentType', 'text')
+    content = body.get('content', '')
+
+    if content_type == 'html' and not html:
+        # Convert HTML to plain text
+        h = html2text.HTML2Text()
+        h.ignore_links = False
+        h.ignore_images = True
+        content = h.handle(content)
+
+    print(content)
+    print("\n" + "=" * 80 + "\n")
+
 
 def cmd_sync(args):
     """Handle 'o365 mail sync' command - calls o365-mail-sync.py"""
+    # TODO: HIGH PRIORITY - Switch to pure Python using Graph API instead of calling external script
+    # This currently depends on ~/bin/o365-mail-sync.py which may not be portable
     cmd = [str(Path.home() / "bin" / "o365-mail-sync.py")]
 
     # Pass through all arguments
@@ -44,77 +201,141 @@ def cmd_sync(args):
 
 
 def cmd_read(args):
-    """Handle 'o365 mail read' command - calls mail-read"""
-    cmd = [str(Path.home() / "bin" / "mail-read")]
+    """Handle 'o365 mail read' command using Graph API"""
+    access_token = get_access_token()
 
-    # Pass through all arguments
+    # If specific message IDs provided, fetch and display those messages
     if args.ids:
-        cmd.extend(args.ids)
-    if args.count:
-        cmd.extend(['-n', str(args.count)])
-    if args.folder:
-        cmd.extend(['-f', args.folder])
-    if args.read_email:
-        cmd.extend(['-r', str(args.read_email)])
-    if args.search:
-        cmd.extend(['-s', args.search])
-    if args.field:
-        cmd.extend(['--field', args.field])
-    if args.since:
-        cmd.extend(['--since', args.since])
-    if args.unread:
-        cmd.append('--unread')
-    if args.read:
-        cmd.append('--read')
-    if args.html:
-        cmd.append('--html')
+        for msg_id in args.ids:
+            url = f"{GRAPH_API_BASE}/me/messages/{msg_id}"
+            msg = make_graph_request(url, access_token)
+            if not msg:
+                print(f"Error: Message not found: {msg_id}", file=sys.stderr)
+                sys.exit(1)
+            display_message(msg, html=args.html)
+        return
 
-    try:
-        result = subprocess.run(cmd, check=True)
-        sys.exit(result.returncode)
-    except subprocess.CalledProcessError as e:
-        sys.exit(e.returncode)
-    except FileNotFoundError:
-        print("Error: mail-read not found", file=sys.stderr)
-        sys.exit(1)
+    # Otherwise, list messages with filters
+    folder = args.folder or 'Inbox'
+    count = args.count or 10
+
+    # Parse --since if specified
+    since = None
+    if args.since:
+        try:
+            since = parse_since_expression(args.since)
+        except ValueError as e:
+            print(f"Error in --since: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Determine unread filter
+    unread_filter = None
+    if args.unread:
+        unread_filter = True
+    elif args.read:
+        unread_filter = False
+
+    # Get messages
+    messages = get_messages(
+        access_token,
+        folder=folder,
+        count=count,
+        since=since,
+        unread=unread_filter,
+        search=args.search
+    )
+
+    # If --read-email specified, display that specific message by index
+    if args.read_email:
+        if args.read_email < 1 or args.read_email > len(messages):
+            print(f"Error: Invalid message number: {args.read_email} (must be 1-{len(messages)})", file=sys.stderr)
+            sys.exit(1)
+        msg = messages[args.read_email - 1]
+        display_message(msg, html=args.html)
+    else:
+        # Display list
+        display_message_list(messages)
 
 
 def cmd_archive(args):
-    """Handle 'o365 mail archive' command - calls mail-archive"""
-    cmd = [str(Path.home() / "bin" / "mail-archive")]
+    """Handle 'o365 mail archive' command using Graph API"""
+    access_token = get_access_token()
 
-    # Pass through all arguments
-    if args.dry_run:
-        cmd.append('--dry-run')
-    cmd.extend(args.ids)
+    # Get Archive folder ID
+    archive_url = f"{GRAPH_API_BASE}/me/mailFolders"
+    folders_result = make_graph_request(archive_url, access_token)
 
-    try:
-        result = subprocess.run(cmd, check=True)
-        sys.exit(result.returncode)
-    except subprocess.CalledProcessError as e:
-        sys.exit(e.returncode)
-    except FileNotFoundError:
-        print("Error: mail-archive not found", file=sys.stderr)
+    if not folders_result:
+        print("Error: Could not fetch mail folders", file=sys.stderr)
         sys.exit(1)
+
+    # Find Archive folder
+    archive_folder_id = None
+    for folder in folders_result.get('value', []):
+        if folder.get('displayName', '').lower() == 'archive':
+            archive_folder_id = folder['id']
+            break
+
+    if not archive_folder_id:
+        print("Error: Archive folder not found", file=sys.stderr)
+        sys.exit(1)
+
+    # Archive each message
+    for msg_id in args.ids:
+        if args.dry_run:
+            # Just fetch and display what would be archived
+            url = f"{GRAPH_API_BASE}/me/messages/{msg_id}"
+            msg = make_graph_request(url, access_token)
+            if msg:
+                subject = msg.get('subject', '(No subject)')
+                print(f"Would archive: {subject} (ID: {msg_id})")
+            else:
+                print(f"Warning: Message not found: {msg_id}", file=sys.stderr)
+        else:
+            # Move message to Archive folder
+            move_url = f"{GRAPH_API_BASE}/me/messages/{msg_id}/move"
+            move_data = {'destinationId': archive_folder_id}
+
+            result = make_graph_request(move_url, access_token, method='POST', data=move_data)
+
+            if result:
+                subject = result.get('subject', '(No subject)')
+                print(f"✓ Archived: {subject}")
+            else:
+                print(f"Error: Failed to archive message: {msg_id}", file=sys.stderr)
+                sys.exit(1)
 
 
 def cmd_mark_read(args):
-    """Handle 'o365 mail mark-read' command - calls mail-mark-read"""
-    cmd = [str(Path.home() / "bin" / "mail-mark-read")]
+    """Handle 'o365 mail mark-read' command using Graph API"""
+    access_token = get_access_token()
 
-    # Pass through all arguments
-    if args.dry_run:
-        cmd.append('--dry-run')
-    cmd.extend(args.ids)
+    # Mark each message as read
+    for msg_id in args.ids:
+        if args.dry_run:
+            # Just fetch and display what would be marked
+            url = f"{GRAPH_API_BASE}/me/messages/{msg_id}"
+            msg = make_graph_request(url, access_token)
+            if msg:
+                subject = msg.get('subject', '(No subject)')
+                is_read = msg.get('isRead', False)
+                status = "already read" if is_read else "would mark as read"
+                print(f"{subject} ({status}) (ID: {msg_id})")
+            else:
+                print(f"Warning: Message not found: {msg_id}", file=sys.stderr)
+        else:
+            # Update message isRead property
+            update_url = f"{GRAPH_API_BASE}/me/messages/{msg_id}"
+            update_data = {'isRead': True}
 
-    try:
-        result = subprocess.run(cmd, check=True)
-        sys.exit(result.returncode)
-    except subprocess.CalledProcessError as e:
-        sys.exit(e.returncode)
-    except FileNotFoundError:
-        print("Error: mail-mark-read not found", file=sys.stderr)
-        sys.exit(1)
+            result = make_graph_request(update_url, access_token, method='PATCH', data=update_data)
+
+            if result:
+                subject = result.get('subject', '(No subject)')
+                print(f"✓ Marked as read: {subject}")
+            else:
+                print(f"Error: Failed to mark message as read: {msg_id}", file=sys.stderr)
+                sys.exit(1)
 
 
 def cmd_send(args):
