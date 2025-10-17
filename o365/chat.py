@@ -6,6 +6,7 @@ List, read, send, and search Microsoft Teams chats.
 
 import sys
 import re
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from .common import get_access_token, make_graph_request, GRAPH_API_BASE
@@ -18,8 +19,16 @@ LOCAL_TZ = datetime.now().astimezone().tzinfo
 
 def parse_graph_datetime(dt_str):
     """Parse Microsoft Graph datetime format"""
-    # Remove excess fractional seconds (keep max 6 digits)
-    dt_str = re.sub(r'\.(\d{6})\d*', r'.\1', dt_str)
+    # Normalize fractional seconds to exactly 6 digits (pad or truncate)
+    match = re.search(r'\.(\d+)', dt_str)
+    if match:
+        frac_seconds = match.group(1)
+        if len(frac_seconds) > 6:
+            # Truncate to 6 digits
+            dt_str = re.sub(r'\.(\d{6})\d*', r'.\1', dt_str)
+        elif len(frac_seconds) < 6:
+            # Pad to 6 digits
+            dt_str = re.sub(r'\.(\d+)', lambda m: '.' + m.group(1).ljust(6, '0'), dt_str)
     # Handle timezone
     if not dt_str.endswith('Z') and '+' not in dt_str and '-' not in dt_str[-6:]:
         dt_str += 'Z'
@@ -43,7 +52,7 @@ def get_chats(access_token, count=50):
         '$orderby': 'lastMessagePreview/createdDateTime desc'
     }
 
-    query_string = '&'.join([f'{k}={v}' for k, v in params.items()])
+    query_string = urllib.parse.urlencode(params)
     url = f"{url}?{query_string}"
 
     chats = []
@@ -142,7 +151,7 @@ def get_chat_messages(access_token, chat_id, count=50, since=None):
         since_str = since_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
         params['$filter'] = f"createdDateTime gt {since_str}"
 
-    query_string = '&'.join([f'{k}={v}' for k, v in params.items()])
+    query_string = urllib.parse.urlencode(params)
     url = f"{url}?{query_string}"
 
     messages = []
