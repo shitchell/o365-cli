@@ -8,6 +8,7 @@ import sys
 import subprocess
 import re
 import html2text
+import argparse
 from pathlib import Path
 from datetime import datetime
 
@@ -493,8 +494,8 @@ def setup_parser(subparsers):
         'read',
         help='List and read emails via Graph API',
         description='List and read emails via Microsoft Graph API.',
-        epilog="""
-Examples:
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
   o365 mail read                          # List all emails (streams results)
   o365 mail read -n 20                    # List only 20 most recent emails
   o365 mail read --unread                 # Show all unread emails
@@ -528,11 +529,11 @@ Examples:
         'archive',
         help='Archive emails to Archive folder',
         description='Archive emails to Archive folder using Graph API.',
-        epilog="""
-Examples:
-  o365 mail archive <MESSAGE_ID>                    # Archive single email
-  o365 mail archive <MESSAGE_ID_1> <MESSAGE_ID_2>   # Archive multiple emails
-  o365 mail archive --dry-run <MESSAGE_ID>          # Preview without archiving
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  o365 mail archive <MESSAGE_ID>                     # Archive single email
+  o365 mail archive <MESSAGE_ID_1> <MESSAGE_ID_2>    # Archive multiple emails
+  o365 mail archive --dry-run <MESSAGE_ID>           # Preview without archiving
 """
     )
     archive_parser.add_argument('ids', nargs='+', metavar='ID',
@@ -546,11 +547,11 @@ Examples:
         'mark-read',
         help='Mark emails as read',
         description='Mark emails as read using Graph API.',
-        epilog="""
-Examples:
-  o365 mail mark-read <MESSAGE_ID>                    # Mark single email as read
-  o365 mail mark-read <MESSAGE_ID_1> <MESSAGE_ID_2>   # Mark multiple emails
-  o365 mail mark-read --dry-run <MESSAGE_ID>          # Preview without marking
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  o365 mail mark-read <MESSAGE_ID>                   # Mark single email as read
+  o365 mail mark-read <MESSAGE_ID_1> <MESSAGE_ID_2>  # Mark multiple emails
+  o365 mail mark-read --dry-run <MESSAGE_ID>         # Preview without marking
 """
     )
     mark_read_parser.add_argument('ids', nargs='+', metavar='ID',
@@ -583,16 +584,11 @@ For full options, see: python -m trinoor.email --help
         'download-attachment',
         help='Download an email attachment',
         description='Download an attachment from an email using Graph API.',
-        epilog="""
-Examples:
-  # Download attachment to current directory
-  o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID>
-
-  # Download to specific location
-  o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID> -o ~/Downloads/
-
-  # Overwrite existing file
-  o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID> --overwrite
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID>                 # Download to current directory
+  o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID> -o ~/Downloads/ # Download to specific location
+  o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID> --overwrite     # Overwrite existing file
 """
     )
     download_attachment_parser.add_argument('message_id', metavar='MESSAGE_ID',
