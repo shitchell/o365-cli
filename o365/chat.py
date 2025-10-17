@@ -450,11 +450,12 @@ def cmd_search(args):
     # Display results
     print(f"\n🔍 Search results for '{args.query}' ({len(results)} found):\n")
 
-    for chat, msg in results:
+    for i, (chat, msg) in enumerate(results):
+        chat_id = chat['id']
         chat_name = get_chat_display_name(chat)
         sender = msg.get('from', {}).get('user', {}).get('displayName', 'Unknown')
         created = parse_graph_datetime(msg['createdDateTime']).astimezone(LOCAL_TZ)
-        time_str = created.strftime('%Y-%m-%d %H:%M')
+        time_str = created.strftime('%Y-%m-%d %H:%M:%S')
 
         body = msg.get('body', {}).get('content', '')
 
@@ -463,12 +464,18 @@ def cmd_search(args):
             body = re.sub(r'<[^>]+>', '', body)
 
         # Truncate long messages
-        if len(body) > 100:
-            body = body[:97] + '...'
+        if len(body) > 200:
+            body = body[:197] + '...'
 
-        print(f"[{time_str}] {chat_name} - {sender}")
-        print(f"  {body}")
-        print()
+        print(f"ID:   {chat_id}")
+        print(f"Date: {time_str}")
+        print(f"Name: {chat_name}")
+        print(f"From: {sender}")
+        print(body)
+
+        # Add separator between results (but not after the last one)
+        if i < len(results) - 1:
+            print("---")
 
 
 # Setup and routing
