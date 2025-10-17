@@ -527,16 +527,16 @@ Examples:
     archive_parser = subparsers.add_parser(
         'archive',
         help='Archive emails to Archive folder',
-        description='Archive emails from Inbox to Archive folder (both locally and on server).',
+        description='Archive emails to Archive folder using Graph API.',
         epilog="""
 Examples:
-  o365 mail archive 60d1969a                    # Archive single email
-  o365 mail archive 60d1969a 4ab19245 8be667d8  # Archive multiple emails
-  o365 mail archive --dry-run 60d1969a          # Preview without archiving
+  o365 mail archive <MESSAGE_ID>                    # Archive single email
+  o365 mail archive <MESSAGE_ID_1> <MESSAGE_ID_2>   # Archive multiple emails
+  o365 mail archive --dry-run <MESSAGE_ID>          # Preview without archiving
 """
     )
     archive_parser.add_argument('ids', nargs='+', metavar='ID',
-                               help='One or more email IDs (8-character hex strings)')
+                               help='One or more email IDs (Graph API message IDs)')
     archive_parser.add_argument('--dry-run', action='store_true',
                                help='Show what would be archived without actually doing it')
     archive_parser.set_defaults(func=cmd_archive)
@@ -545,16 +545,16 @@ Examples:
     mark_read_parser = subparsers.add_parser(
         'mark-read',
         help='Mark emails as read',
-        description='Mark emails as read (both locally and on server).',
+        description='Mark emails as read using Graph API.',
         epilog="""
 Examples:
-  o365 mail mark-read f1486a8d                      # Mark single email as read
-  o365 mail mark-read f1486a8d 0bc59901 01c77910    # Mark multiple emails
-  o365 mail mark-read --dry-run f1486a8d            # Preview without marking
+  o365 mail mark-read <MESSAGE_ID>                    # Mark single email as read
+  o365 mail mark-read <MESSAGE_ID_1> <MESSAGE_ID_2>   # Mark multiple emails
+  o365 mail mark-read --dry-run <MESSAGE_ID>          # Preview without marking
 """
     )
     mark_read_parser.add_argument('ids', nargs='+', metavar='ID',
-                                 help='One or more email IDs (8-character hex strings)')
+                                 help='One or more email IDs (Graph API message IDs)')
     mark_read_parser.add_argument('--dry-run', action='store_true',
                                  help='Show what would be marked without actually doing it')
     mark_read_parser.set_defaults(func=cmd_mark_read)

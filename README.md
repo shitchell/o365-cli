@@ -4,14 +4,16 @@ A unified command-line interface for managing Office365 email, calendar, and con
 
 ## Features
 
-- **Email Management**: Sync, read, archive, and send emails
+- **Email Management**: Read, archive, mark read, and send emails via Graph API
 - **Calendar**: View and create calendar events, manage invites
 - **Teams Chats**: List, read, send, and search Microsoft Teams chats
 - **OneDrive & SharePoint**: List, search, download, and upload files across personal and shared drives
 - **Meeting Recordings**: List, search, download, and view transcripts of Teams meeting recordings
 - **Contacts**: Search and manage contacts
 - **OAuth2 Authentication**: Secure device code flow authentication
-- **Local Storage**: Maildir format for offline email access
+- **Streaming Results**: Efficient pagination with immediate display for large result sets
+- **External Sender Detection**: Automatic tagging of emails from outside your organization
+- **Attachment Support**: Download email attachments with inline image detection
 - **Timezone Support**: Automatic timezone handling for calendar queries
 - **Git-style Time Parsing**: Natural time expressions like "2 days ago" and "yesterday"
 
@@ -54,15 +56,7 @@ o365 auth login
 
 This will prompt you to visit a URL and enter a device code. Follow the instructions to complete authentication.
 
-### 2. Sync Emails
-
-Sync your emails to local storage:
-
-```bash
-o365 mail sync
-```
-
-### 3. Read Emails
+### 2. Read Emails
 
 List unread emails:
 
@@ -70,7 +64,7 @@ List unread emails:
 o365 mail read --unread
 ```
 
-### 4. View Calendar
+### 3. View Calendar
 
 See today's events:
 
@@ -83,24 +77,33 @@ o365 calendar list --today
 ### Mail Commands
 
 ```bash
-# Sync emails from server
-o365 mail sync
-o365 mail sync --folders Inbox --count 50
+# List emails (streams all results by default)
+o365 mail read
+o365 mail read --unread                      # Only unread emails
+o365 mail read --since "2 days ago"          # Emails from last 2 days
+o365 mail read -n 20                         # Limit to 20 most recent
+o365 mail read -s "payment"                  # Search for "payment"
 
-# Read emails
-o365 mail read --unread
-o365 mail read --since "2 days ago" -n 20
-o365 mail read 48608adc f1486a8d  # Read by ID
+# Read specific email by ID (full Graph API message ID)
+o365 mail read AAMkADFhY2VlZWU4LWMxMTItNGRiYy04ZjlkLTc3...
 
-# Archive emails
-o365 mail archive 60d1969a 4ab19245
+# Archive emails (use full message IDs from mail read output)
+o365 mail archive AAMkADFhY2VlZWU4LWMxMTItNGRiYy04ZjlkLTc3...
+o365 mail archive --dry-run AAMkADFhY2VlZWU4...  # Preview first
 
-# Mark as read
-o365 mail mark-read f1486a8d 0bc59901
+# Mark emails as read
+o365 mail mark-read AAMkADFhY2VlZWU4LWMxMTItNGRiYy04ZjlkLTc3...
+o365 mail mark-read --dry-run AAMkADFhY2VlZWU4...  # Preview first
+
+# Download email attachment
+o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID>
+o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID> -o ~/Downloads/
 
 # Send email
 echo "<p>Hello!</p>" | o365 mail send -r recipient@example.com -S "Subject" -H -
 ```
+
+**Note**: Message IDs are displayed in full when listing emails. Copy the full ID from the `ID:` line to use with read, archive, or mark-read commands. The `[external]` prefix indicates emails from senders outside your organization.
 
 ### Calendar Commands
 
@@ -364,15 +367,10 @@ export SMTP_SIGNATURE_FILE=~/.signature.html
 
 - **Configuration**: `~/.config/o365/config`
 - **OAuth Tokens**: `~/.config/o365/tokens.json` (default)
-- **Local Mail**: `~/.mail/office365/` (default)
-  - `INBOX/` - Inbox emails
-  - `Sent/` - Sent emails
-  - `Drafts/` - Draft emails
-  - `Trash/` - Deleted emails
-  - `Archive/` - Archived emails
-- **Sync State**: `~/.mail/office365/.sync-state.json`
 
 All paths can be customized via config file or environment variables.
+
+**Note**: Email commands now interact directly with Office365 via Graph API rather than syncing to local storage.
 
 ## Architecture
 
@@ -393,6 +391,7 @@ o365/
 
 - Python 3.7+
 - `python-dateutil` for time parsing
+- `html2text` for email content conversion
 
 ## Development
 
@@ -425,5 +424,5 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## Acknowledgments
 
 - Uses Microsoft Graph API for Office365 integration
-- Maildir format for local email storage
 - Device code flow for terminal-friendly OAuth2 authentication
+- HTML to text conversion via html2text library
