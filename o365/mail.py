@@ -105,8 +105,8 @@ def display_message_list(messages):
         return
 
     print(f"\n📧 Messages ({len(messages)} shown):\n")
-    print(f"{'#':<4} {'Date':<12} {'From':<30} {'Subject':<50}")
-    print("=" * 100)
+    print(f"{'#':<4} {'Date':<12} {'From':<25} {'Subject':<40} {'ID':<60}")
+    print("=" * 145)
 
     for i, msg in enumerate(messages, 1):
         # Parse date
@@ -123,9 +123,12 @@ def display_message_list(messages):
         # Mark unread with indicator
         unread_mark = '●' if not msg.get('isRead', True) else ' '
 
-        print(f"{i:<4} {date_str:<12} {sender[:28]:<30} {unread_mark} {subject[:48]:<50}")
+        # Get message ID (truncate for display)
+        msg_id = msg['id'][:58]  # Truncate to fit column
 
-    print(f"\nUse message ID or number to read a specific message")
+        print(f"{i:<4} {date_str:<12} {sender[:23]:<25} {unread_mark} {subject[:38]:<40} {msg_id:<60}")
+
+    print(f"\nUse 'o365 mail read <ID>' or 'o365 mail read -r <#>' to read a specific message")
 
 
 def display_message(msg, html=False):
