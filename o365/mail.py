@@ -57,7 +57,7 @@ def get_messages(access_token, folder='Inbox', count=10, since=None, unread=None
         '$top': str(count),
         '$orderby': 'receivedDateTime desc',
         '$select': 'id,subject,from,receivedDateTime,isRead,body,bodyPreview,hasAttachments',
-        '$expand': 'attachments($select=id,name,contentType,size)'
+        '$expand': 'attachments($select=id,name,contentType,size,isInline)'
     }
 
     # Add filters
@@ -122,9 +122,13 @@ def display_message_list(messages):
         # Mark unread with indicator
         unread_mark = '●' if not msg.get('isRead', True) else ' '
 
-        # Check for attachments
-        has_attachments = msg.get('hasAttachments', False)
-        attachment_mark = '📎' if has_attachments else ''
+        # Check for real attachments (not inline images)
+        has_real_attachments = False
+        for att in msg.get('attachments', []):
+            if not att.get('isInline', False):
+                has_real_attachments = True
+                break
+        attachment_mark = '📎' if has_real_attachments else ''
 
         # Full message ID
         msg_id = msg['id']
@@ -165,15 +169,40 @@ def display_message(msg, html=False):
     # Show attachments if present
     attachments = msg.get('attachments', [])
     if attachments:
-        print(f"\nAttachments ({len(attachments)}):")
+        # Separate into real attachments vs inline images
+        real_attachments = []
+        inline_attachments = []
+
         for att in attachments:
-            name = att.get('name', 'Unknown')
-            size = att.get('size', 0)
-            att_id = att.get('id', 'Unknown')
-            # Format size
-            size_str = format_size(size)
-            print(f"  📎 {name} ({size_str})")
-            print(f"     ID: {att_id}")
+            if att.get('isInline', False):
+                inline_attachments.append(att)
+            else:
+                real_attachments.append(att)
+
+        # Show real attachments first
+        if real_attachments:
+            print(f"\nAttachments ({len(real_attachments)}):")
+            for att in real_attachments:
+                name = att.get('name', 'Unknown')
+                size = att.get('size', 0)
+                att_id = att.get('id', 'Unknown')
+                size_str = format_size(size)
+                print(f"  📎 {name} ({size_str})")
+                print(f"     ID: {att_id}")
+
+        # Show inline attachments separately (collapsed by default)
+        if inline_attachments:
+            print(f"\nInline Images ({len(inline_attachments)}) - signatures, embedded content:")
+            for att in inline_attachments:
+                name = att.get('name', 'Unknown')
+                size = att.get('size', 0)
+                att_id = att.get('id', 'Unknown')
+                content_id = att.get('contentId', '')
+                size_str = format_size(size)
+                # Show CID if available (useful for debugging)
+                cid_str = f" [cid:{content_id}]" if content_id else ""
+                print(f"  🖼️  {name} ({size_str}){cid_str}")
+                print(f"     ID: {att_id}")
 
     print("=" * 80 + "\n")
 
