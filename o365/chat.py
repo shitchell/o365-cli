@@ -146,10 +146,8 @@ def get_chat_messages(access_token, chat_id, count=50, since=None):
         '$orderby': 'createdDateTime desc'
     }
 
-    if since:
-        since_utc = since.astimezone(timezone.utc)
-        since_str = since_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
-        params['$filter'] = f"createdDateTime gt {since_str}"
+    # Note: Chat messages API doesn't support $filter by createdDateTime
+    # We fetch messages and filter locally instead
 
     query_string = urllib.parse.urlencode(params)
     url = f"{url}?{query_string}"
@@ -160,10 +158,20 @@ def get_chat_messages(access_token, chat_id, count=50, since=None):
         if not result:
             break
 
-        messages.extend(result.get('value', []))
+        for msg in result.get('value', []):
+            # Apply local date filter
+            if since:
+                msg_date = parse_graph_datetime(msg['createdDateTime'])
+                if msg_date < since:
+                    continue
+            messages.append(msg)
+
+            if len(messages) >= count:
+                break
+
         url = result.get('@odata.nextLink')
 
-        # Respect count limit
+        # Stop if we've reached count limit
         if len(messages) >= count:
             messages = messages[:count]
             break
@@ -195,7 +203,7 @@ def send_message(access_token, chat_id, content):
     return make_graph_request(url, access_token, method='POST', data=message)
 
 
-def search_messages(access_token, query, chats=None, count=50):
+def search_messages(access_token, query, chats=None, count=50, since=None):
     """Search for messages containing query
 
     Note: Graph API doesn't have a direct message search endpoint,
@@ -206,6 +214,7 @@ def search_messages(access_token, query, chats=None, count=50):
         query: Search query string
         chats: Optional list of chats to search in (if None, searches all)
         count: Maximum number of results
+        since: Optional datetime to filter messages after
 
     Returns:
         List of (chat, message) tuples
@@ -217,9 +226,17 @@ def search_messages(access_token, query, chats=None, count=50):
     query_lower = query.lower()
 
     for chat in chats:
-        messages = get_chat_messages(access_token, chat['id'], count=50)
+        # Note: Chat messages API doesn't support $filter by createdDateTime,
+        # so we fetch all messages and filter locally
+        messages = get_chat_messages(access_token, chat['id'], count=50, since=None)
 
         for msg in messages:
+            # Apply local date filter
+            if since:
+                msg_date = parse_graph_datetime(msg['createdDateTime'])
+                if msg_date < since:
+                    continue
+
             body = msg.get('body', {}).get('content', '').lower()
             if query_lower in body:
                 results.append((chat, msg))
@@ -414,17 +431,17 @@ def cmd_search(args):
             print(f"No chats found with '{args.with_user}'")
             return
 
-    # Apply --since filter
+    # Parse --since filter
+    since_date = None
     if args.since:
         try:
             since_date = parse_since_expression(args.since)
-            # Note: We'll filter messages by date during search
         except ValueError as e:
             print(f"Error in --since: {e}", file=sys.stderr)
             sys.exit(1)
 
     # Search messages
-    results = search_messages(access_token, args.query, chats=chats, count=args.count or 50)
+    results = search_messages(access_token, args.query, chats=chats, count=args.count or 50, since=since_date)
 
     if not results:
         print(f"No messages found matching '{args.query}'")
