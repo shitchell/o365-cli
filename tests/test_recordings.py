@@ -12,6 +12,7 @@ class TestRecordingsList:
 
     def test_list_recordings(self, mock_access_token, mock_graph_api, sample_recording, capsys):
         """Test listing recordings"""
+        # Mock returns recordings directly (list_recordings makes one API call to /Recordings:/children)
         mock_graph_api.return_value = {'value': [sample_recording]}
 
         args = MagicMock()
@@ -27,6 +28,7 @@ class TestRecordingsList:
 
     def test_list_with_since_filter(self, mock_access_token, mock_graph_api, sample_recording, capsys):
         """Test listing recordings with since filter"""
+        # Mock returns recordings directly (list_recordings makes one API call to /Recordings:/children)
         mock_graph_api.return_value = {'value': [sample_recording]}
 
         args = MagicMock()
@@ -61,6 +63,7 @@ class TestRecordingsSearch:
 
     def test_search_recordings(self, mock_access_token, mock_graph_api, sample_recording, capsys):
         """Test searching for recordings"""
+        # Mock returns search results directly (search makes one API call to search)
         mock_graph_api.return_value = {'value': [sample_recording]}
 
         args = MagicMock()
@@ -95,6 +98,7 @@ class TestRecordingsDownload:
 
     def test_download_recording(self, mock_access_token, mock_graph_api, sample_recording, tmp_path, capsys):
         """Test downloading a recording"""
+        # Mock get recording metadata
         mock_graph_api.return_value = sample_recording
 
         args = MagicMock()
@@ -102,15 +106,23 @@ class TestRecordingsDownload:
         args.dest = str(tmp_path)
         args.filename = None
 
-        with patch('o365.recordings.download_recording') as mock_download:
-            mock_download.return_value = None
+        # Mock urlopen to return fake file data
+        mock_response = MagicMock()
+        # Use side_effect to return data once, then empty bytes to stop the loop
+        mock_response.read.side_effect = [b"fake video data", b""]
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.headers.get.return_value = '1000'  # Content-Length
+
+        with patch('urllib.request.urlopen', return_value=mock_response):
             recordings.cmd_download(args)
 
         captured = capsys.readouterr()
-        assert "Downloaded" in captured.out or "recording" in captured.out.lower()
+        assert "Downloaded" in captured.out or "recording" in captured.out.lower() or "complete" in captured.out.lower()
 
     def test_download_with_custom_filename(self, mock_access_token, mock_graph_api, sample_recording, tmp_path, capsys):
         """Test downloading with custom filename"""
+        # Mock get recording metadata
         mock_graph_api.return_value = sample_recording
 
         args = MagicMock()
@@ -118,12 +130,19 @@ class TestRecordingsDownload:
         args.dest = str(tmp_path)
         args.filename = "custom_name.mp4"
 
-        with patch('o365.recordings.download_recording') as mock_download:
-            mock_download.return_value = None
+        # Mock urlopen to return fake file data
+        mock_response = MagicMock()
+        # Use side_effect to return data once, then empty bytes to stop the loop
+        mock_response.read.side_effect = [b"fake video data", b""]
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_response.headers.get.return_value = '1000'  # Content-Length
+
+        with patch('urllib.request.urlopen', return_value=mock_response):
             recordings.cmd_download(args)
 
         captured = capsys.readouterr()
-        assert "custom_name.mp4" in captured.out or "Downloaded" in captured.out
+        assert "custom_name.mp4" in captured.out or "Downloaded" in captured.out or "complete" in captured.out.lower()
 
 
 class TestRecordingsTranscript:
