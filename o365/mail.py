@@ -56,7 +56,8 @@ def get_messages(access_token, folder='Inbox', count=10, since=None, unread=None
     params = {
         '$top': str(count),
         '$orderby': 'receivedDateTime desc',
-        '$select': 'id,subject,from,receivedDateTime,isRead,body,bodyPreview'
+        '$select': 'id,subject,from,receivedDateTime,isRead,body,bodyPreview,hasAttachments',
+        '$expand': 'attachments($select=id,name,contentType,size)'
     }
 
     # Add filters
@@ -99,19 +100,17 @@ def get_messages(access_token, folder='Inbox', count=10, since=None, unread=None
 
 
 def display_message_list(messages):
-    """Display a list of messages in tabular format"""
+    """Display a list of messages in block format with full IDs"""
     if not messages:
         print("No messages found")
         return
 
     print(f"\n📧 Messages ({len(messages)} shown):\n")
-    print(f"{'#':<4} {'Date':<12} {'From':<25} {'Subject':<40} {'ID':<60}")
-    print("=" * 145)
 
     for i, msg in enumerate(messages, 1):
         # Parse date
         received = parse_graph_datetime(msg['receivedDateTime']).astimezone(LOCAL_TZ)
-        date_str = received.strftime('%Y-%m-%d')
+        date_str = received.strftime('%Y-%m-%d %H:%M')
 
         # Get sender
         from_field = msg.get('from', {}).get('emailAddress', {})
@@ -123,12 +122,19 @@ def display_message_list(messages):
         # Mark unread with indicator
         unread_mark = '●' if not msg.get('isRead', True) else ' '
 
-        # Get message ID (truncate for display)
-        msg_id = msg['id'][:58]  # Truncate to fit column
+        # Check for attachments
+        has_attachments = msg.get('hasAttachments', False)
+        attachment_mark = '📎' if has_attachments else ''
 
-        print(f"{i:<4} {date_str:<12} {sender[:23]:<25} {unread_mark} {subject[:38]:<40} {msg_id:<60}")
+        # Full message ID
+        msg_id = msg['id']
 
-    print(f"\nUse 'o365 mail read <ID>' or 'o365 mail read -r <#>' to read a specific message")
+        print(f"{unread_mark} [{date_str}] {sender}")
+        print(f"  Subject: {subject} {attachment_mark}")
+        print(f"  ID: {msg_id}")
+        print()
+
+    print(f"Use 'o365 mail read <ID>' to read a specific message")
 
 
 def display_message(msg, html=False):
@@ -155,6 +161,20 @@ def display_message(msg, html=False):
     print(f"Date:    {date_str}")
     print(f"Subject: {msg.get('subject', '(No subject)')}")
     print(f"ID:      {msg['id']}")
+
+    # Show attachments if present
+    attachments = msg.get('attachments', [])
+    if attachments:
+        print(f"\nAttachments ({len(attachments)}):")
+        for att in attachments:
+            name = att.get('name', 'Unknown')
+            size = att.get('size', 0)
+            att_id = att.get('id', 'Unknown')
+            # Format size
+            size_str = format_size(size)
+            print(f"  📎 {name} ({size_str})")
+            print(f"     ID: {att_id}")
+
     print("=" * 80 + "\n")
 
     # Print body
@@ -171,6 +191,15 @@ def display_message(msg, html=False):
 
     print(content)
     print("\n" + "=" * 80 + "\n")
+
+
+def format_size(bytes_size):
+    """Format byte size to human-readable string"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes_size < 1024.0:
+            return f"{bytes_size:.1f}{unit}"
+        bytes_size /= 1024.0
+    return f"{bytes_size:.1f}TB"
 
 
 def cmd_sync(args):
@@ -210,7 +239,7 @@ def cmd_read(args):
     # If specific message IDs provided, fetch and display those messages
     if args.ids:
         for msg_id in args.ids:
-            url = f"{GRAPH_API_BASE}/me/messages/{msg_id}"
+            url = f"{GRAPH_API_BASE}/me/messages/{msg_id}?$expand=attachments"
             msg = make_graph_request(url, access_token)
             if not msg:
                 print(f"Error: Message not found: {msg_id}", file=sys.stderr)
@@ -248,16 +277,8 @@ def cmd_read(args):
         search=args.search
     )
 
-    # If --read-email specified, display that specific message by index
-    if args.read_email:
-        if args.read_email < 1 or args.read_email > len(messages):
-            print(f"Error: Invalid message number: {args.read_email} (must be 1-{len(messages)})", file=sys.stderr)
-            sys.exit(1)
-        msg = messages[args.read_email - 1]
-        display_message(msg, html=args.html)
-    else:
-        # Display list
-        display_message_list(messages)
+    # Display list
+    display_message_list(messages)
 
 
 def cmd_archive(args):
@@ -341,6 +362,53 @@ def cmd_mark_read(args):
                 sys.exit(1)
 
 
+def cmd_download_attachment(args):
+    """Handle 'o365 mail download-attachment' command using Graph API"""
+    access_token = get_access_token()
+
+    # Download the attachment
+    url = f"{GRAPH_API_BASE}/me/messages/{args.message_id}/attachments/{args.attachment_id}"
+    attachment = make_graph_request(url, access_token)
+
+    if not attachment:
+        print(f"Error: Attachment not found", file=sys.stderr)
+        sys.exit(1)
+
+    # Get attachment details
+    name = attachment.get('name', 'attachment')
+    content_bytes = attachment.get('contentBytes')
+
+    if not content_bytes:
+        print(f"Error: Attachment has no content", file=sys.stderr)
+        sys.exit(1)
+
+    # Decode base64 content
+    import base64
+    content = base64.b64decode(content_bytes)
+
+    # Determine output path
+    if args.output:
+        output_path = Path(args.output)
+        if output_path.is_dir():
+            output_path = output_path / name
+    else:
+        output_path = Path.cwd() / name
+
+    # Check if file exists
+    if output_path.exists() and not args.overwrite:
+        print(f"Error: File exists: {output_path}", file=sys.stderr)
+        print("Use --overwrite to overwrite existing files", file=sys.stderr)
+        sys.exit(1)
+
+    # Write attachment to file
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(content)
+
+    print(f"✓ Downloaded: {name}")
+    print(f"  Saved to: {output_path}")
+    print(f"  Size: {format_size(len(content))}")
+
+
 def cmd_send(args):
     """Handle 'o365 mail send' command - calls trinoor.email module"""
     cmd = ['python', '-m', 'trinoor.email']
@@ -400,28 +468,25 @@ Examples:
     # o365 mail read
     read_parser = subparsers.add_parser(
         'read',
-        help='List and read emails from local Maildir',
-        description='List and read emails from local Maildir.',
+        help='List and read emails via Graph API',
+        description='List and read emails via Microsoft Graph API.',
         epilog="""
 Examples:
   o365 mail read                          # List 10 most recent emails
   o365 mail read --unread                 # Show only unread emails
   o365 mail read --since "2 days ago"     # Show emails from last 2 days
-  o365 mail read -r 3                     # Read email #3 from list
-  o365 mail read 48608adc f1486a8d        # Read emails by ID
+  o365 mail read <MESSAGE_ID>             # Read specific email by ID
   o365 mail read -s "payment"             # Search for "payment" in subject
 """
     )
     read_parser.add_argument('ids', nargs='*', metavar='ID',
-                            help='Email IDs to read (8-character hex strings)')
+                            help='Email IDs to read (Graph API message IDs)')
     read_parser.add_argument('-n', '--count', type=int, metavar='N',
                             help='Number of emails to list (default: 10)')
     read_parser.add_argument('-f', '--folder', type=str, metavar='FOLDER',
-                            help='Folder to read from (default: INBOX)')
-    read_parser.add_argument('-r', '--read-email', type=int, metavar='N',
-                            help='Read email number N from the list')
+                            help='Folder to read from (default: Inbox)')
     read_parser.add_argument('-s', '--search', type=str, metavar='PATTERN',
-                            help='Search emails by pattern (regex)')
+                            help='Search emails by pattern')
     read_parser.add_argument('--field', type=str, choices=['subject', 'from', 'to'],
                             help='Field to search in (default: subject)')
     read_parser.add_argument('--since', type=str, metavar='EXPR',
@@ -488,6 +553,33 @@ For full options, see: python -m trinoor.email --help
     # Note: We're not adding arguments here because we pass everything through to trinoor.email
     # This allows trinoor.email to handle its own argument parsing
     send_parser.set_defaults(func=cmd_send)
+
+    # o365 mail download-attachment
+    download_attachment_parser = subparsers.add_parser(
+        'download-attachment',
+        help='Download an email attachment',
+        description='Download an attachment from an email using Graph API.',
+        epilog="""
+Examples:
+  # Download attachment to current directory
+  o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID>
+
+  # Download to specific location
+  o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID> -o ~/Downloads/
+
+  # Overwrite existing file
+  o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID> --overwrite
+"""
+    )
+    download_attachment_parser.add_argument('message_id', metavar='MESSAGE_ID',
+                                           help='Message ID containing the attachment')
+    download_attachment_parser.add_argument('attachment_id', metavar='ATTACHMENT_ID',
+                                           help='Attachment ID to download')
+    download_attachment_parser.add_argument('-o', '--output', type=str, metavar='PATH',
+                                           help='Output file or directory (default: current directory)')
+    download_attachment_parser.add_argument('--overwrite', action='store_true',
+                                           help='Overwrite existing file')
+    download_attachment_parser.set_defaults(func=cmd_download_attachment)
 
 
 def handle_command(args):
