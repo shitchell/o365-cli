@@ -23,6 +23,37 @@ MAILDIR_BASE = Path.home() / ".mail" / "office365"
 # Get local timezone
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 
+# Cache for user's email domain
+_USER_DOMAIN = None
+
+
+def get_user_domain(access_token):
+    """Get the logged-in user's email domain"""
+    global _USER_DOMAIN
+    if _USER_DOMAIN is None:
+        user = make_graph_request('/me', access_token)
+        if user:
+            email = user.get('mail') or user.get('userPrincipalName', '')
+            if '@' in email:
+                _USER_DOMAIN = email.split('@')[1].lower()
+            else:
+                _USER_DOMAIN = ''
+        else:
+            _USER_DOMAIN = ''
+    return _USER_DOMAIN
+
+
+def is_external_sender(sender_email, user_domain):
+    """Check if sender is from outside the organization"""
+    if not sender_email or not user_domain:
+        return False
+
+    if '@' not in sender_email:
+        return False
+
+    sender_domain = sender_email.split('@')[1].lower()
+    return sender_domain != user_domain
+
 
 def parse_graph_datetime(dt_str):
     """Parse Microsoft Graph datetime format"""
@@ -35,26 +66,28 @@ def parse_graph_datetime(dt_str):
     return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
 
 
-def get_messages(access_token, folder='Inbox', count=10, since=None, unread=None, search=None):
-    """Get messages from a mail folder
+def get_messages_stream(access_token, folder='Inbox', max_count=None, since=None, unread=None, search=None):
+    """Get messages from a mail folder, yielding pages as they're fetched
 
     Args:
         access_token: OAuth2 access token
         folder: Folder name (default: Inbox)
-        count: Maximum number of messages
+        max_count: Maximum number of messages (None for unlimited)
         since: Optional datetime to filter messages after
         unread: Optional filter for unread (True), read (False), or all (None)
         search: Optional search query
 
-    Returns:
-        List of message objects
+    Yields:
+        Lists of message objects (one list per page)
     """
     # Build URL
     url = f"{GRAPH_API_BASE}/me/mailFolders/{folder}/messages"
 
-    # Build query parameters
+    # Build query parameters - use a reasonable page size for streaming
+    # Graph API default is 10, but we'll use 50 for better performance
+    page_size = 50
     params = {
-        '$top': str(count),
+        '$top': str(page_size),
         '$orderby': 'receivedDateTime desc',
         '$select': 'id,subject,from,receivedDateTime,isRead,body,bodyPreview,hasAttachments',
         '$expand': 'attachments($select=id,name,contentType,size,isInline)'
@@ -79,66 +112,73 @@ def get_messages(access_token, folder='Inbox', count=10, since=None, unread=None
     query_string = urllib.parse.urlencode(params)
     url = f"{url}?{query_string}"
 
-    # Fetch messages with pagination
-    messages = []
+    # Fetch messages with pagination, yielding each page
+    total_fetched = 0
     while url:
         result = make_graph_request(url, access_token)
         if not result:
             break
 
-        messages.extend(result.get('value', []))
+        page_messages = result.get('value', [])
+
+        # If max_count is set, truncate this page if needed
+        if max_count is not None:
+            remaining = max_count - total_fetched
+            if remaining <= 0:
+                break
+            if len(page_messages) > remaining:
+                page_messages = page_messages[:remaining]
+
+        total_fetched += len(page_messages)
+
+        # Yield this page of messages
+        if page_messages:
+            yield page_messages
 
         # Check for pagination
         url = result.get('@odata.nextLink')
 
-        # Respect count limit
-        if len(messages) >= count:
-            messages = messages[:count]
+        # Stop if we've hit the limit
+        if max_count is not None and total_fetched >= max_count:
             break
 
-    return messages
 
+def display_message_summary(msg, user_domain):
+    """Display a single message in list format"""
+    # Parse date
+    received = parse_graph_datetime(msg['receivedDateTime']).astimezone(LOCAL_TZ)
+    date_str = received.strftime('%Y-%m-%d %H:%M')
 
-def display_message_list(messages):
-    """Display a list of messages in block format with full IDs"""
-    if not messages:
-        print("No messages found")
-        return
+    # Get sender
+    from_field = msg.get('from', {}).get('emailAddress', {})
+    sender = from_field.get('name') or from_field.get('address', 'Unknown')
+    sender_email = from_field.get('address', '')
 
-    print(f"\n📧 Messages ({len(messages)} shown):\n")
+    # Get subject
+    subject = msg.get('subject', '(No subject)')
 
-    for i, msg in enumerate(messages, 1):
-        # Parse date
-        received = parse_graph_datetime(msg['receivedDateTime']).astimezone(LOCAL_TZ)
-        date_str = received.strftime('%Y-%m-%d %H:%M')
+    # Add [external] prefix if sender is from outside the organization
+    if is_external_sender(sender_email, user_domain):
+        subject = f"[external] {subject}"
 
-        # Get sender
-        from_field = msg.get('from', {}).get('emailAddress', {})
-        sender = from_field.get('name') or from_field.get('address', 'Unknown')
+    # Mark unread with indicator
+    unread_mark = '●' if not msg.get('isRead', True) else ' '
 
-        # Get subject
-        subject = msg.get('subject', '(No subject)')
+    # Check for real attachments (not inline images)
+    has_real_attachments = False
+    for att in msg.get('attachments', []):
+        if not att.get('isInline', False):
+            has_real_attachments = True
+            break
+    attachment_mark = '📎' if has_real_attachments else ''
 
-        # Mark unread with indicator
-        unread_mark = '●' if not msg.get('isRead', True) else ' '
+    # Full message ID
+    msg_id = msg['id']
 
-        # Check for real attachments (not inline images)
-        has_real_attachments = False
-        for att in msg.get('attachments', []):
-            if not att.get('isInline', False):
-                has_real_attachments = True
-                break
-        attachment_mark = '📎' if has_real_attachments else ''
-
-        # Full message ID
-        msg_id = msg['id']
-
-        print(f"{unread_mark} [{date_str}] {sender}")
-        print(f"  Subject: {subject} {attachment_mark}")
-        print(f"  ID: {msg_id}")
-        print()
-
-    print(f"Use 'o365 mail read <ID>' to read a specific message")
+    print(f"{unread_mark} [{date_str}] {sender}")
+    print(f"  Subject: {subject} {attachment_mark}")
+    print(f"  ID: {msg_id}")
+    print()
 
 
 def display_message(msg, html=False):
@@ -231,36 +271,6 @@ def format_size(bytes_size):
     return f"{bytes_size:.1f}TB"
 
 
-def cmd_sync(args):
-    """Handle 'o365 mail sync' command - calls o365-mail-sync.py"""
-    # TODO: HIGH PRIORITY - Switch to pure Python using Graph API instead of calling external script
-    # This currently depends on ~/bin/o365-mail-sync.py which may not be portable
-    cmd = [str(Path.home() / "bin" / "o365-mail-sync.py")]
-
-    # Pass through all arguments
-    if args.folders:
-        cmd.extend(['--folders'] + args.folders)
-    if args.count:
-        cmd.extend(['--count', str(args.count)])
-    if args.since:
-        cmd.extend(['--since', args.since])
-    if args.all:
-        cmd.append('--all')
-    if args.focused_inbox:
-        cmd.append('--focused-inbox')
-    if args.list_folders:
-        cmd.append('--list-folders')
-
-    try:
-        result = subprocess.run(cmd, check=True)
-        sys.exit(result.returncode)
-    except subprocess.CalledProcessError as e:
-        sys.exit(e.returncode)
-    except FileNotFoundError:
-        print("Error: o365-mail-sync.py not found", file=sys.stderr)
-        sys.exit(1)
-
-
 def cmd_read(args):
     """Handle 'o365 mail read' command using Graph API"""
     access_token = get_access_token()
@@ -278,7 +288,8 @@ def cmd_read(args):
 
     # Otherwise, list messages with filters
     folder = args.folder or 'Inbox'
-    count = args.count or 10
+    # If -n not specified, show all messages (None = unlimited)
+    max_count = args.count
 
     # Parse --since if specified
     since = None
@@ -296,18 +307,27 @@ def cmd_read(args):
     elif args.read:
         unread_filter = False
 
-    # Get messages
-    messages = get_messages(
+    # Get user's domain for external sender detection
+    user_domain = get_user_domain(access_token)
+
+    # Stream and display messages as they're fetched
+    total_displayed = 0
+    for page in get_messages_stream(
         access_token,
         folder=folder,
-        count=count,
+        max_count=max_count,
         since=since,
         unread=unread_filter,
         search=args.search
-    )
+    ):
+        for msg in page:
+            display_message_summary(msg, user_domain)
+            total_displayed += 1
 
-    # Display list
-    display_message_list(messages)
+    if total_displayed == 0:
+        print("No messages found")
+    else:
+        print(f"\nUse 'o365 mail read <ID>' to read a specific message")
 
 
 def cmd_archive(args):
@@ -468,32 +488,6 @@ def cmd_send(args):
 def setup_parser(subparsers):
     """Setup argparse subcommands for mail"""
 
-    # o365 mail sync
-    sync_parser = subparsers.add_parser(
-        'sync',
-        help='Sync emails from Office365 to local Maildir',
-        description='Sync emails from Office365 to local Maildir format.',
-        epilog="""
-Examples:
-  o365 mail sync                              # Sync default folders
-  o365 mail sync --folders Inbox --count 50   # Sync last 50 from Inbox
-  o365 mail sync --all                        # Sync all folders
-"""
-    )
-    sync_parser.add_argument('--folders', nargs='+', metavar='FOLDER',
-                            help='Sync specific folders (e.g., Inbox SentItems Drafts)')
-    sync_parser.add_argument('--count', type=int, metavar='N',
-                            help='Maximum number of messages to fetch per folder')
-    sync_parser.add_argument('--since', type=str, metavar='DATE',
-                            help='Sync messages since date (ISO 8601 format)')
-    sync_parser.add_argument('--all', action='store_true',
-                            help='Sync all available folders')
-    sync_parser.add_argument('--focused-inbox', action='store_true',
-                            help='Split Inbox into INBOX.Focused and INBOX.Other')
-    sync_parser.add_argument('--list-folders', action='store_true',
-                            help='List all available mail folders')
-    sync_parser.set_defaults(func=cmd_sync)
-
     # o365 mail read
     read_parser = subparsers.add_parser(
         'read',
@@ -501,17 +495,18 @@ Examples:
         description='List and read emails via Microsoft Graph API.',
         epilog="""
 Examples:
-  o365 mail read                          # List 10 most recent emails
-  o365 mail read --unread                 # Show only unread emails
+  o365 mail read                          # List all emails (streams results)
+  o365 mail read -n 20                    # List only 20 most recent emails
+  o365 mail read --unread                 # Show all unread emails
   o365 mail read --since "2 days ago"     # Show emails from last 2 days
   o365 mail read <MESSAGE_ID>             # Read specific email by ID
-  o365 mail read -s "payment"             # Search for "payment" in subject
+  o365 mail read -s "payment"             # Search for "payment" in emails
 """
     )
     read_parser.add_argument('ids', nargs='*', metavar='ID',
                             help='Email IDs to read (Graph API message IDs)')
     read_parser.add_argument('-n', '--count', type=int, metavar='N',
-                            help='Number of emails to list (default: 10)')
+                            help='Number of emails to list (default: all, fetched in pages of 50)')
     read_parser.add_argument('-f', '--folder', type=str, metavar='FOLDER',
                             help='Folder to read from (default: Inbox)')
     read_parser.add_argument('-s', '--search', type=str, metavar='PATTERN',
