@@ -379,19 +379,20 @@ def cmd_search(args):
         return
 
     print(f"\n🔍 Search results for '{args.query}' ({len(recordings)} found):\n")
-    print(f"{'ID':<12} {'Date':<20} {'Name':<50} {'Size':<10}")
-    print("=" * 95)
 
-    for rec in recordings:
-        rec_id = rec['id'][:10] + '..'
+    for i, rec in enumerate(recordings, 1):
         created = parse_graph_datetime(rec['createdDateTime'])
         date_str = created.strftime('%Y-%m-%d %H:%M')
-        name = rec['name'][:48]
+        name = rec['name']
         size = format_size(rec.get('size', 0))
+        rec_id = rec['id']
 
-        print(f"{rec_id:<12} {date_str:<20} {name:<50} {size:<10}")
+        print(f"{i}. {name}")
+        print(f"   Date: {date_str}  Size: {size}")
+        print(f"   ID: {rec_id}")
+        print()
 
-    print(f"\nFull IDs shown above. Use 'o365 recordings download <full-id>' to download.")
+    print(f"Use 'o365 recordings download <id>' to download a recording")
 
 
 def cmd_download(args):

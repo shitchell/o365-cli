@@ -269,11 +269,11 @@ def cmd_list(args):
 
     # Display chats
     print(f"\n💬 Chats ({len(chats)} shown):\n")
-    print(f"{'ID':<10} {'Type':<8} {'Name':<40} {'Last Message':<30}")
-    print("=" * 90)
+    print(f"{'ID':<50} {'Type':<8} {'Name':<40}")
+    print("=" * 100)
 
     for chat in chats:
-        chat_id = chat['id'][:8] + '...'
+        chat_id = chat['id']
         chat_type = chat.get('chatType', 'unknown')
         name = get_chat_display_name(chat)[:38]
 
@@ -286,10 +286,9 @@ def cmd_list(args):
         else:
             last_msg_str = ''
 
-        print(f"{chat_id:<10} {chat_type:<8} {name:<40} {last_msg_str:<30}")
+        print(f"{chat_id:<50} {chat_type:<8} {name:<40}")
 
     print(f"\nUse 'o365 chat read <chat-id>' to read messages")
-    print("(Full chat IDs are in the output above)")
 
 
 def cmd_read(args):
