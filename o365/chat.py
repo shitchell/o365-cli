@@ -89,8 +89,13 @@ def filter_chats_by_user_or_name(chats, query, access_token):
 
     filtered = []
     for chat in chats:
+        # Skip None entries
+        if chat is None:
+            continue
+
         # Check if chat topic matches query (for group chats)
-        topic = chat.get('topic', '').lower()
+        # Note: topic can be explicitly None for 1:1 chats
+        topic = (chat.get('topic') or '').lower()
         if query.lower() in topic:
             filtered.append(chat)
             continue
@@ -98,8 +103,8 @@ def filter_chats_by_user_or_name(chats, query, access_token):
         # Check if any member matches the user
         members = chat.get('members', [])
         for member in members:
-            user_principal = member.get('email', '').lower()
-            display_name = member.get('displayName', '').lower()
+            user_principal = (member.get('email') or '').lower()
+            display_name = (member.get('displayName') or '').lower()
 
             if user_principal in user_emails or query.lower() in display_name:
                 filtered.append(chat)
@@ -128,25 +133,29 @@ def get_chat_display_name(chat):
     return 'Unknown Chat'
 
 
-def get_chat_messages(access_token, chat_id, count=50, since=None):
+def get_chat_messages(access_token, chat_id, count=50, since=None, fetch_all=False):
     """Get messages from a chat
 
     Args:
         access_token: OAuth2 access token
         chat_id: Chat ID
-        count: Maximum number of messages to retrieve
+        count: Maximum number of messages to retrieve (None for unlimited if fetch_all=True)
         since: Optional datetime to filter messages after
+        fetch_all: If True, fetch all messages with pagination (ignores count limit)
 
     Returns:
         List of message objects
     """
     url = f"{GRAPH_API_BASE}/chats/{chat_id}/messages"
+
+    # Use max allowed page size (API limit is 50)
+    page_size = 50
     params = {
-        '$top': str(count),
+        '$top': str(page_size),
         '$orderby': 'createdDateTime desc'
     }
 
-    # Note: Chat messages API doesn't support $filter by createdDateTime
+    # Note: Chat messages API doesn't support $filter by createdDateTime or body content
     # We fetch messages and filter locally instead
 
     query_string = urllib.parse.urlencode(params)
@@ -166,13 +175,14 @@ def get_chat_messages(access_token, chat_id, count=50, since=None):
                     continue
             messages.append(msg)
 
-            if len(messages) >= count:
+            # Check count limit only if not fetching all
+            if not fetch_all and count and len(messages) >= count:
                 break
 
         url = result.get('@odata.nextLink')
 
-        # Stop if we've reached count limit
-        if len(messages) >= count:
+        # Stop if we've reached count limit (only when not fetching all)
+        if not fetch_all and count and len(messages) >= count:
             messages = messages[:count]
             break
 
@@ -203,18 +213,107 @@ def send_message(access_token, chat_id, content):
     return make_graph_request(url, access_token, method='POST', data=message)
 
 
-def search_messages(access_token, query, chats=None, count=50, since=None):
+def search_messages_via_api(access_token, query, count=50, chat_id=None, since=None):
+    """Search for messages using Microsoft Graph Search API
+
+    Uses POST /search/query endpoint which searches server-side and is much faster
+    than fetching all messages locally. If chat_id is specified, filters results
+    to only that chat.
+
+    Args:
+        access_token: OAuth2 access token
+        query: Search query string
+        count: Maximum number of matching results to return
+        chat_id: Optional chat ID to filter results to
+        since: Optional datetime to filter messages after
+
+    Returns:
+        List of (chat_id, message) tuples
+    """
+    # Search API for chatMessages requires beta endpoint
+    url = "https://graph.microsoft.com/beta/search/query"
+
+    results = []
+    from_index = 0
+    page_size = 25  # Graph API default for search
+
+    # Keep fetching until we have enough matching results
+    while len(results) < count:
+        # Build search request
+        search_request = {
+            "requests": [{
+                "entityTypes": ["chatMessage"],
+                "query": {
+                    "queryString": query
+                },
+                "from": from_index,
+                "size": page_size
+            }]
+        }
+
+        # Make search request
+        search_result = make_graph_request(url, access_token, method='POST', data=search_request)
+
+        if not search_result:
+            # Return None to indicate failure (likely permissions issue)
+            return None
+
+        # Extract hits from response
+        hits_containers = search_result.get('value', [{}])[0].get('hitsContainers', [])
+        if not hits_containers:
+            break
+
+        hits = hits_containers[0].get('hits', [])
+        if not hits:
+            break  # No more results
+
+        # Process each hit
+        for hit in hits:
+            resource = hit.get('resource', {})
+            msg_chat_id = resource.get('chatId')
+
+            # Filter by chat_id if specified
+            if chat_id and msg_chat_id != chat_id:
+                continue
+
+            # Filter by date if specified
+            if since:
+                created_str = resource.get('createdDateTime')
+                if created_str:
+                    created = parse_graph_datetime(created_str)
+                    if created < since:
+                        continue
+
+            # Add to results
+            results.append((msg_chat_id, resource))
+
+            if len(results) >= count:
+                break
+
+        # Check if there might be more results
+        more_results_available = hits_containers[0].get('moreResultsAvailable', False)
+        if not more_results_available:
+            break
+
+        # Move to next page
+        from_index += page_size
+
+    return results[:count]
+
+
+def search_messages(access_token, query, chats=None, count=50, since=None, fetch_all_from_chat=False):
     """Search for messages containing query
 
-    Note: Graph API doesn't have a direct message search endpoint,
+    Note: Graph API doesn't support $filter by body content for chat messages,
     so we fetch messages from chats and filter locally.
 
     Args:
         access_token: OAuth2 access token
         query: Search query string
         chats: Optional list of chats to search in (if None, searches all)
-        count: Maximum number of results
+        count: Maximum number of results to return
         since: Optional datetime to filter messages after
+        fetch_all_from_chat: If True, fetch all messages from each chat (for single chat searches)
 
     Returns:
         List of (chat, message) tuples
@@ -226,9 +325,9 @@ def search_messages(access_token, query, chats=None, count=50, since=None):
     query_lower = query.lower()
 
     for chat in chats:
-        # Note: Chat messages API doesn't support $filter by createdDateTime,
-        # so we fetch all messages and filter locally
-        messages = get_chat_messages(access_token, chat['id'], count=50, since=None)
+        # Fetch messages from this chat
+        # If searching a single specific chat, fetch all messages with pagination
+        messages = get_chat_messages(access_token, chat['id'], count=None if fetch_all_from_chat else 50, since=None, fetch_all=fetch_all_from_chat)
 
         for msg in messages:
             # Apply local date filter
@@ -626,15 +725,66 @@ def cmd_search(args):
     """Handle 'o365 chat search' command"""
     access_token = get_access_token()
 
-    # Get chats (optionally filtered by --with)
-    chats = get_chats(access_token, count=50)
+    # Parse --since filter
+    since_date = None
+    if args.since:
+        try:
+            since_date = parse_since_expression(args.since)
+        except ValueError as e:
+            print(f"Error in --since: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    if args.with_user:
-        chats = filter_chats_by_user_or_name(chats, args.with_user, access_token)
+    # Determine search count
+    search_count = args.count or 50
+
+    # Try Search API first if --chat is specified or no --with filter
+    # Search API is much faster but requires ChannelMessage.Read.All permission
+    # Fall back to local search if Search API fails due to permissions
+    use_local_search = False
+
+    if args.chat_id or not args.with_user:
+        # Validate chat ID exists if specified
+        if args.chat_id:
+            url = f"{GRAPH_API_BASE}/chats/{args.chat_id}"
+            chat = make_graph_request(url, access_token)
+            if not chat:
+                print(f"Error: Chat not found: {args.chat_id}", file=sys.stderr)
+                sys.exit(1)
+
+        # Try Search API (fast server-side search)
+        results = search_messages_via_api(
+            access_token,
+            args.query,
+            count=search_count,
+            chat_id=args.chat_id,
+            since=since_date
+        )
+
+        # If Search API returns empty list, it might have failed - fall back to local search
+        # (Note: make_graph_request returns None on error, which causes empty results)
+        if results is None or (args.chat_id and len(results) == 0):
+            # Likely failed due to permissions, fall back to local search
+            print(f"Note: Search API requires ChannelMessage.Read.All permission. Using slower local search...", file=sys.stderr)
+            use_local_search = True
+            results = None
+
+    if use_local_search or args.with_user:
+        # Use local search when filtering by --with (need to get specific chats first)
+        if args.chat_id:
+            # If --chat was specified but Search API failed, use that specific chat
+            chats = [chat]
+        else:
+            chats = get_chats(access_token, count=50)
+            if args.with_user:
+                chats = filter_chats_by_user_or_name(chats, args.with_user, access_token)
 
         if not chats:
             print(f"No chats found with '{args.with_user}'")
             return
+
+        # When searching a specific chat, fetch all messages for thorough search
+        fetch_all = bool(args.chat_id)
+        results = search_messages(access_token, args.query, chats=chats, count=search_count, since=since_date, fetch_all_from_chat=fetch_all)
 
     # Resolve --from user if specified
     from_user = None
@@ -653,32 +803,26 @@ def cmd_search(args):
 
         from_user = matches[0]
 
-    # Parse --since filter
-    since_date = None
-    if args.since:
-        try:
-            since_date = parse_since_expression(args.since)
-        except ValueError as e:
-            print(f"Error in --since: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    # Search messages
-    results = search_messages(access_token, args.query, chats=chats, count=args.count or 50, since=since_date)
-
     # Filter by --from user if specified
     if from_user:
         filtered_results = []
         from_email = from_user['email'].lower()
         from_name = from_user['name'].lower()
 
-        for chat, msg in results:
+        for item in results:
+            # Handle both formats: (chat_id, msg) from Search API or (chat, msg) from local search
+            if isinstance(item[0], str):
+                chat_id, msg = item
+            else:
+                chat, msg = item
+
             sender_info = msg.get('from', {}).get('user', {})
             sender_email = sender_info.get('userPrincipalName', '').lower()
             sender_name = sender_info.get('displayName', '').lower()
 
             # Match by email or name
             if sender_email == from_email or sender_name == from_name:
-                filtered_results.append((chat, msg))
+                filtered_results.append(item)
 
         results = filtered_results
 
@@ -692,9 +836,15 @@ def cmd_search(args):
     # Display results
     print(f"\n🔍 Search results for '{args.query}' ({len(results)} found):\n")
 
-    for i, (chat, msg) in enumerate(results):
-        chat_id = chat['id']
-        chat_name = get_chat_display_name(chat)
+    for i, item in enumerate(results):
+        # Handle both formats: (chat_id, msg) from Search API or (chat, msg) from local search
+        if isinstance(item[0], str):
+            chat_id, msg = item
+            chat_name = "Unknown Chat"  # Search API doesn't provide chat details
+        else:
+            chat, msg = item
+            chat_id = chat['id']
+            chat_name = get_chat_display_name(chat)
         sender = msg.get('from', {}).get('user', {}).get('displayName', 'Unknown')
         created = parse_graph_datetime(msg['createdDateTime']).astimezone(LOCAL_TZ)
         time_str = created.strftime('%Y-%m-%d %H:%M:%S')
@@ -782,6 +932,8 @@ def setup_parser(subparsers):
     )
 
     search_parser.add_argument('query', help='Search query string')
+    search_parser.add_argument('--chat', dest='chat_id', type=str, metavar='CHAT_ID',
+                              help='Search only in specific chat ID')
     search_parser.add_argument('--with', dest='with_user', type=str, metavar='USER',
                               help='Search only chats with specific user or group chat name')
     search_parser.add_argument('--from', dest='from_user', type=str, metavar='USER',
