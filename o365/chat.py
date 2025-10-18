@@ -500,6 +500,9 @@ def search_messages_structured(access_token, query, chats=None, count=50, since=
     """
     Search for messages as structured data (for MCP/programmatic use).
 
+    Uses fast server-side Search API when possible, with automatic fallback
+    to local search if Search API requires additional permissions.
+
     Args:
         access_token: OAuth2 access token
         query: Search query string
@@ -520,10 +523,39 @@ def search_messages_structured(access_token, query, chats=None, count=50, since=
                 'content_type': str
             }
     """
-    results = search_messages(access_token, query, chats, count, since)
+    # Try fast Search API first (only when not filtering by specific chats)
+    results = None
+    if chats is None:
+        results = search_messages_via_api(
+            access_token,
+            query,
+            count=count,
+            chat_id=None,
+            since=since
+        )
+
+    # Fall back to local search if Search API failed or chats filter specified
+    if results is None:
+        results = search_messages(access_token, query, chats, count, since)
 
     structured_results = []
-    for chat, msg in results:
+
+    # Handle both Search API results (chat_id, msg) and local search results (chat, msg)
+    for item1, msg in results:
+        # Determine if this is from Search API (chat_id is string) or local search (chat is dict)
+        if isinstance(item1, str):
+            # Search API result: item1 is chat_id string
+            chat_id = item1
+            # Need to fetch chat details for display name
+            chat_url = f"{GRAPH_API_BASE}/chats/{chat_id}"
+            chat = make_graph_request(chat_url, access_token)
+            chat_name = get_chat_display_name(chat) if chat else chat_id
+        else:
+            # Local search result: item1 is chat dict
+            chat = item1
+            chat_id = chat.get('id', '')
+            chat_name = get_chat_display_name(chat)
+
         sender = msg.get('from', {}).get('user', {})
         body = msg.get('body', {})
 
@@ -534,8 +566,8 @@ def search_messages_structured(access_token, query, chats=None, count=50, since=
             content = re.sub(r'<[^>]+>', '', content)
 
         structured_results.append({
-            'chat_id': chat.get('id', ''),
-            'chat_name': get_chat_display_name(chat),
+            'chat_id': chat_id,
+            'chat_name': chat_name,
             'message_id': msg.get('id', ''),
             'created_datetime': msg.get('createdDateTime', ''),
             'sender_name': sender.get('displayName', ''),
