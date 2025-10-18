@@ -136,3 +136,6 @@ dmypy.json
 *.swp
 *.swo
 *~
+
+# Documentation (keep local only)
+docs/
