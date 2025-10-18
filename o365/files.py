@@ -326,6 +326,267 @@ def upload_file(access_token, source_path, dest_path, drive_id=None, overwrite=F
         return None
 
 
+# ============================================================================
+# STRUCTURED DATA FUNCTIONS (for MCP and programmatic access)
+# ============================================================================
+
+def get_drives_structured(access_token):
+    """
+    Get all available drives as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+
+    Returns:
+        list[dict]: List of drive dictionaries with schema:
+            {
+                'id': str,
+                'name': str,
+                'drive_type': str,
+                'owner_name': str,
+                'owner_email': str,
+                'web_url': str
+            }
+    """
+    drives = get_drives(access_token)
+
+    structured_drives = []
+    for drive in drives:
+        owner = drive.get('owner', {}).get('user', {})
+        structured_drives.append({
+            'id': drive.get('id', ''),
+            'name': drive.get('name', ''),
+            'drive_type': drive.get('driveType', ''),
+            'owner_name': owner.get('displayName', ''),
+            'owner_email': owner.get('email', ''),
+            'web_url': drive.get('webUrl', '')
+        })
+
+    return structured_drives
+
+
+def list_files_structured(access_token, path='/', drive_id=None, recursive=False, since=None):
+    """
+    List files and folders as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        path: Path to list (default: root)
+        drive_id: Drive ID (default: personal OneDrive)
+        recursive: List subdirectories recursively
+        since: Optional datetime to filter files modified since
+
+    Returns:
+        list[dict]: List of file/folder dictionaries with schema:
+            {
+                'id': str,
+                'name': str,
+                'type': 'file' | 'folder',
+                'size': int,
+                'size_formatted': str,
+                'modified_datetime': str (ISO 8601),
+                'web_url': str,
+                'download_url': str,
+                'parent_path': str
+            }
+    """
+    items = list_files(access_token, path, drive_id, recursive, since)
+
+    structured_items = []
+    for item in items:
+        item_type = 'folder' if 'folder' in item else 'file'
+        size = item.get('size', 0) if 'size' in item else 0
+        modified = item.get('lastModifiedDateTime', '')
+
+        parent_ref = item.get('parentReference', {})
+        parent_path = parent_ref.get('path', '').replace('/drive/root:', '') or '/'
+
+        structured_items.append({
+            'id': item.get('id', ''),
+            'name': item.get('name', ''),
+            'type': item_type,
+            'size': size,
+            'size_formatted': format_size(size) if size else '-',
+            'modified_datetime': modified,
+            'web_url': item.get('webUrl', ''),
+            'download_url': item.get('@microsoft.graph.downloadUrl', ''),
+            'parent_path': parent_path
+        })
+
+    return structured_items
+
+
+def search_files_structured(access_token, query, drive_id=None, file_type=None, since=None, count=50):
+    """
+    Search for files as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        query: Search query (filename or content)
+        drive_id: Optional drive ID to limit search
+        file_type: Optional file extension filter (pdf, xlsx, docx, etc.)
+        since: Optional datetime to filter files modified since
+        count: Maximum results to return
+
+    Returns:
+        list[dict]: List of file dictionaries with schema:
+            {
+                'id': str,
+                'name': str,
+                'type': 'file' | 'folder',
+                'size': int,
+                'size_formatted': str,
+                'modified_datetime': str (ISO 8601),
+                'web_url': str,
+                'download_url': str,
+                'parent_path': str
+            }
+    """
+    items = search_files(access_token, query, drive_id, file_type, since, count)
+
+    # Reuse list_files_structured transformation logic
+    structured_items = []
+    for item in items:
+        item_type = 'folder' if 'folder' in item else 'file'
+        size = item.get('size', 0) if 'size' in item else 0
+        modified = item.get('lastModifiedDateTime', '')
+
+        parent_ref = item.get('parentReference', {})
+        parent_path = parent_ref.get('path', '').replace('/drive/root:', '') or '/'
+
+        structured_items.append({
+            'id': item.get('id', ''),
+            'name': item.get('name', ''),
+            'type': item_type,
+            'size': size,
+            'size_formatted': format_size(size) if size else '-',
+            'modified_datetime': modified,
+            'web_url': item.get('webUrl', ''),
+            'download_url': item.get('@microsoft.graph.downloadUrl', ''),
+            'parent_path': parent_path
+        })
+
+    return structured_items
+
+
+def download_file_structured(access_token, item_id, dest_path, drive_id=None):
+    """
+    Download a file and return status (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        item_id: File item ID
+        dest_path: Local destination path
+        drive_id: Drive ID (default: personal OneDrive)
+
+    Returns:
+        dict: Status dictionary with schema:
+            On success:
+                {
+                    'status': 'success',
+                    'message': str,
+                    'item_id': str,
+                    'dest_path': str
+                }
+            On error:
+                {
+                    'status': 'error',
+                    'message': str,
+                    'error': str,
+                    'item_id': str
+                }
+    """
+    try:
+        success = download_file(access_token, item_id, dest_path, drive_id)
+
+        if success:
+            return {
+                'status': 'success',
+                'message': 'File downloaded successfully',
+                'item_id': item_id,
+                'dest_path': str(dest_path)
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': 'Failed to download file',
+                'error': 'Download operation returned False',
+                'item_id': item_id
+            }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': 'Failed to download file',
+            'error': str(e),
+            'item_id': item_id
+        }
+
+
+def upload_file_structured(access_token, source_path, dest_path, drive_id=None, overwrite=False):
+    """
+    Upload a file and return status (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        source_path: Local file path
+        dest_path: Remote destination path
+        drive_id: Drive ID (default: personal OneDrive)
+        overwrite: Overwrite existing file
+
+    Returns:
+        dict: Status dictionary with schema:
+            On success:
+                {
+                    'status': 'success',
+                    'message': str,
+                    'item': {
+                        'id': str,
+                        'name': str,
+                        'size': int,
+                        'web_url': str
+                    }
+                }
+            On error:
+                {
+                    'status': 'error',
+                    'message': str,
+                    'error': str
+                }
+    """
+    try:
+        result = upload_file(access_token, source_path, dest_path, drive_id, overwrite)
+
+        if result:
+            return {
+                'status': 'success',
+                'message': 'File uploaded successfully',
+                'item': {
+                    'id': result.get('id', ''),
+                    'name': result.get('name', ''),
+                    'size': result.get('size', 0),
+                    'web_url': result.get('webUrl', '')
+                }
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': 'Failed to upload file',
+                'error': 'Upload operation returned None'
+            }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': 'Failed to upload file',
+            'error': str(e)
+        }
+
+
+# ============================================================================
+# CLI COMMAND FUNCTIONS
+# ============================================================================
+
 # Command handlers
 
 def cmd_drives(args):

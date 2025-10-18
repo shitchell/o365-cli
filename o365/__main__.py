@@ -68,6 +68,15 @@ For more help on a specific command:
     config_parser = subparsers.add_parser('config', help='Manage configuration settings')
     config_subparsers = config_parser.add_subparsers(dest='config_command', help='Configuration operations')
 
+    # MCP server command
+    mcp_parser = subparsers.add_parser('mcp', help='Start MCP server for LLM integration')
+    mcp_parser.add_argument(
+        '--log-level',
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default='INFO',
+        help='Logging level (default: INFO)'
+    )
+
     # Import and setup subcommands (lazy import to avoid loading all modules at startup)
     from . import mail, calendar, contacts, chat, files, recordings, auth, config_cmd
 
@@ -137,6 +146,11 @@ For more help on a specific command:
             config_parser.print_help()
             sys.exit(1)
         config_cmd.handle_command(args)
+
+    elif args.command == 'mcp':
+        # Import and run MCP server
+        from . import mcp_server
+        mcp_server.main()
 
 
 if __name__ == '__main__':
