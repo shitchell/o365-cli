@@ -89,7 +89,6 @@ def get_messages_stream(access_token, folder='Inbox', max_count=None, since=None
     page_size = 50
     params = {
         '$top': str(page_size),
-        '$orderby': 'receivedDateTime desc',
         '$select': 'id,subject,from,receivedDateTime,isRead,body,bodyPreview,hasAttachments',
         '$expand': 'attachments($select=id,name,contentType,size,isInline)'
     }
@@ -103,7 +102,11 @@ def get_messages_stream(access_token, folder='Inbox', max_count=None, since=None
         filters.append(f"isRead eq {str(not unread).lower()}")
     if search:
         # Use $search for full-text search across subject, body, etc.
+        # Note: $orderby is not supported with $search in Graph API
         params['$search'] = f'"{search}"'
+    else:
+        # Only add $orderby when NOT using $search
+        params['$orderby'] = 'receivedDateTime desc'
 
     if filters:
         params['$filter'] = ' and '.join(filters)
@@ -511,9 +514,7 @@ def setup_parser(subparsers):
     read_parser.add_argument('-f', '--folder', type=str, metavar='FOLDER',
                             help='Folder to read from (default: Inbox)')
     read_parser.add_argument('-s', '--search', type=str, metavar='PATTERN',
-                            help='Search emails by pattern')
-    read_parser.add_argument('--field', type=str, choices=['subject', 'from', 'to'],
-                            help='Field to search in (default: subject)')
+                            help='Search emails by pattern (searches across subject, body, sender, etc.)')
     read_parser.add_argument('--since', type=str, metavar='EXPR',
                             help='Only show emails since this time (git-style format)')
     read_parser.add_argument('--unread', action='store_true',
