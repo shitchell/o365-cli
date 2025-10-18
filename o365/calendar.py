@@ -364,6 +364,201 @@ def display_events(events, start_date, end_date, user_email=None):
     print(f"\nTotal: {len(events)} events\n")
 
 
+# ============================================================================
+# STRUCTURED DATA FUNCTIONS (for MCP and programmatic access)
+# ============================================================================
+
+def get_events_structured(access_token, start_date, end_date, user_email=None):
+    """
+    Get calendar events as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        start_date: Start datetime (timezone-aware)
+        end_date: End datetime (timezone-aware)
+        user_email: Optional user email to view their calendar
+
+    Returns:
+        list[dict]: List of event dictionaries with schema:
+            {
+                'id': str,
+                'subject': str,
+                'start_datetime': str (ISO 8601),
+                'end_datetime': str (ISO 8601),
+                'location': str,
+                'organizer_name': str,
+                'organizer_email': str,
+                'attendees': list[dict],
+                'is_online_meeting': bool,
+                'online_meeting_url': str,
+                'body_preview': str,
+                'body_content': str
+            }
+    """
+    # Get raw events from Graph API
+    events = list_events(access_token, start_date, end_date, user_email)
+
+    # Transform to structured format
+    structured_events = []
+    for event in events:
+        structured_event = {
+            'id': event.get('id', ''),
+            'subject': event.get('subject', '(No subject)'),
+            'start_datetime': event.get('start', {}).get('dateTime', ''),
+            'end_datetime': event.get('end', {}).get('dateTime', ''),
+            'location': event.get('location', {}).get('displayName', ''),
+            'organizer_name': event.get('organizer', {}).get('emailAddress', {}).get('name', ''),
+            'organizer_email': event.get('organizer', {}).get('emailAddress', {}).get('address', ''),
+            'attendees': [],
+            'is_online_meeting': event.get('isOnlineMeeting', False),
+            'online_meeting_url': event.get('onlineMeeting', {}).get('joinUrl', ''),
+            'body_preview': event.get('bodyPreview', ''),
+            'body_content': event.get('body', {}).get('content', '')
+        }
+
+        # Parse attendees
+        for attendee in event.get('attendees', []):
+            email_address = attendee.get('emailAddress', {})
+            structured_event['attendees'].append({
+                'name': email_address.get('name', ''),
+                'email': email_address.get('address', ''),
+                'type': attendee.get('type', ''),
+                'status': attendee.get('status', {}).get('response', '')
+            })
+
+        structured_events.append(structured_event)
+
+    return structured_events
+
+
+def create_event_structured(access_token, title, start_time, duration,
+                           required_attendees=None, optional_attendees=None,
+                           description=None, location=None, online_meeting=False):
+    """
+    Create a calendar event and return structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        title: Event subject/title
+        start_time: datetime object for event start (timezone-aware)
+        duration: timedelta object for event duration
+        required_attendees: List of email addresses (required attendees)
+        optional_attendees: List of email addresses (optional attendees)
+        description: Event body/description
+        location: Event location string
+        online_meeting: If True, create as Teams online meeting
+
+    Returns:
+        dict: Result dictionary with schema:
+            On success:
+                {
+                    'status': 'success',
+                    'event': {
+                        'id': str,
+                        'subject': str,
+                        'start_datetime': str (ISO 8601),
+                        'end_datetime': str (ISO 8601),
+                        'location': str,
+                        'online_meeting_url': str
+                    }
+                }
+            On error:
+                {
+                    'status': 'error',
+                    'message': str,
+                    'error': str
+                }
+    """
+    try:
+        # Create the event using existing function
+        event = create_event(
+            access_token, title, start_time, duration,
+            required_attendees, optional_attendees,
+            description, location, online_meeting
+        )
+
+        if not event:
+            return {
+                'status': 'error',
+                'message': 'Failed to create event',
+                'error': 'Graph API returned empty response'
+            }
+
+        # Return structured success response
+        return {
+            'status': 'success',
+            'event': {
+                'id': event.get('id', ''),
+                'subject': event.get('subject', ''),
+                'start_datetime': event.get('start', {}).get('dateTime', ''),
+                'end_datetime': event.get('end', {}).get('dateTime', ''),
+                'location': event.get('location', {}).get('displayName', ''),
+                'online_meeting_url': event.get('onlineMeeting', {}).get('joinUrl', '')
+            }
+        }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': 'Failed to create event',
+            'error': str(e)
+        }
+
+
+def delete_event_structured(access_token, event_id):
+    """
+    Delete a calendar event and return status (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        event_id: Event ID to delete
+
+    Returns:
+        dict: Status dictionary with schema:
+            On success:
+                {
+                    'status': 'success',
+                    'message': str,
+                    'event_id': str
+                }
+            On error:
+                {
+                    'status': 'error',
+                    'message': str,
+                    'error': str,
+                    'event_id': str
+                }
+    """
+    try:
+        success = delete_event(access_token, event_id)
+
+        if success:
+            return {
+                'status': 'success',
+                'message': 'Event deleted successfully',
+                'event_id': event_id
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': 'Failed to delete event',
+                'error': 'Graph API returned error',
+                'event_id': event_id
+            }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': 'Failed to delete event',
+            'error': str(e),
+            'event_id': event_id
+        }
+
+
+# ============================================================================
+# CLI COMMAND FUNCTIONS
+# ============================================================================
+
 # Command handlers
 
 def cmd_list(args):

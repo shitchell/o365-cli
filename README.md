@@ -2,7 +2,11 @@
 
 A unified command-line interface for managing Office365 email, calendar, and contacts.
 
+**✨ NEW: MCP Server Support!** Use Office 365 with Claude Desktop through natural language. [Learn more](#mcp-server)
+
 ## Features
+
+### Core Features
 
 - **Email Management**: Read, archive, mark read, and send emails via Graph API
 - **Calendar**: View and create calendar events, manage invites
@@ -16,6 +20,21 @@ A unified command-line interface for managing Office365 email, calendar, and con
 - **Attachment Support**: Download email attachments with inline image detection
 - **Timezone Support**: Automatic timezone handling for calendar queries
 - **Git-style Time Parsing**: Natural time expressions like "2 days ago" and "yesterday"
+
+### 🚀 MCP Server (NEW!)
+
+- **Model Context Protocol Server**: Integrate Office 365 with Claude Desktop and other MCP clients
+- **20 Tools**: Access email, calendar, files, chats, contacts, and recordings via natural language
+- **3 Prompt Templates**: Pre-built workflows for common tasks
+- **Natural Language Queries**: Just ask Claude what you need!
+
+**Example MCP queries:**
+- "Check my unread emails from the last 2 days"
+- "What meetings do I have tomorrow?"
+- "Search my OneDrive for budget spreadsheets"
+- "Show me my recent Teams chats"
+
+See [MCP Server](#mcp-server) section below for setup instructions.
 
 ## Installation
 
@@ -372,6 +391,105 @@ All paths can be customized via config file or environment variables.
 
 **Note**: Email commands now interact directly with Office365 via Graph API rather than syncing to local storage.
 
+## MCP Server
+
+The Office 365 MCP (Model Context Protocol) Server enables natural language interaction with your Office 365 account through Claude Desktop and other MCP-compatible clients.
+
+### What is MCP?
+
+Model Context Protocol (MCP) is an open protocol developed by Anthropic that allows AI assistants like Claude to securely connect to external data sources and tools. With the Office 365 MCP server, you can use natural language to:
+
+- Check and manage your emails
+- View and create calendar events
+- Search and manage files in OneDrive
+- Read and send Teams messages
+- Search contacts
+- Access meeting recordings and transcripts
+
+### Quick Setup
+
+1. **Install with MCP support:**
+
+```bash
+pip install git+https://github.com/shitchell/o365-cli.git
+pip install "o365-cli[mcp]"
+```
+
+2. **Authenticate with Office 365:**
+
+```bash
+o365 auth login
+```
+
+3. **Configure Claude Desktop:**
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or equivalent:
+
+```json
+{
+  "mcpServers": {
+    "office365": {
+      "command": "/path/to/o365-mcp"
+    }
+  }
+}
+```
+
+Find your path with: `which o365-mcp`
+
+4. **Restart Claude Desktop** and look for the 🔨 icon to see 20 available Office 365 tools!
+
+### Available Tools
+
+The MCP server provides **20 tools** across 6 categories:
+
+| Category | Tools | Examples |
+|----------|-------|----------|
+| **📧 Email** | `read_emails`, `get_email_content`, `send_email` | "Check unread emails from last week" |
+| **📅 Calendar** | `list_calendar_events`, `create_calendar_event`, `delete_calendar_event` | "What meetings do I have tomorrow?" |
+| **📁 Files** | `list_onedrive_files`, `search_onedrive`, `download_onedrive_file`, `upload_onedrive_file` | "Search OneDrive for budget files" |
+| **💬 Teams Chat** | `list_teams_chats`, `read_chat_messages`, `send_chat_message`, `search_teams_messages` | "Show recent Teams messages" |
+| **👥 Contacts** | `search_contacts`, `list_contacts` | "Find John Doe's email" |
+| **🎥 Recordings** | `list_recordings`, `search_recordings`, `download_recording`, `get_recording_transcript` | "List last week's meeting recordings" |
+
+### Example Queries
+
+Once configured, you can ask Claude Desktop questions like:
+
+```
+What unread emails do I have from the last 2 days?
+
+Show me my calendar for next week
+
+Search my OneDrive for files containing "quarterly report"
+
+What are my recent Teams chats?
+
+Create a meeting tomorrow at 2pm titled "Project Sync" with john@example.com
+
+List my Teams meeting recordings from last month
+```
+
+### Documentation
+
+- **[MCP User Guide](docs/MCP_USER_GUIDE.md)** - Complete setup and usage guide
+- **[Tool Reference](docs/MCP_TOOLS_REFERENCE.md)** - Detailed documentation for all 20 tools
+- **[Implementation Plan](docs/MCP_IMPLEMENTATION_PLAN.md)** - Technical architecture and development details
+
+### Entry Points
+
+The MCP server can be started two ways:
+
+```bash
+# Dedicated command
+o365-mcp
+
+# Subcommand
+o365 mcp
+```
+
+Both start the same MCP server. Claude Desktop will use the configured command automatically.
+
 ## Architecture
 
 The `o365` command is implemented as a Python package with the following structure:
@@ -384,14 +502,34 @@ o365/
 ├── mail.py           # Mail command implementations
 ├── calendar.py       # Calendar command implementations
 ├── contacts.py       # Contacts command implementations
-└── auth.py           # Authentication command implementations
+├── chat.py           # Teams chat command implementations
+├── files.py          # OneDrive/SharePoint command implementations
+├── recordings.py     # Meeting recordings command implementations
+├── auth.py           # Authentication command implementations
+├── config_cmd.py     # Configuration command implementations
+└── mcp_server.py     # MCP server implementation (20 tools, 3 prompts, 1 resource)
 ```
+
+Each module provides both CLI commands and structured data functions, enabling both command-line usage and MCP integration.
 
 ## Requirements
 
-- Python 3.7+
+### Core Requirements
+
+- Python 3.10+ (3.10+ required for MCP server)
 - `python-dateutil` for time parsing
 - `html2text` for email content conversion
+
+### Optional Requirements
+
+- `mcp` SDK for MCP server functionality (install with `pip install "o365-cli[mcp]"`)
+
+### Development Requirements
+
+- `pytest` for testing
+- `pytest-mock` for test mocking
+- `black` for code formatting
+- `flake8` for linting
 
 ## Development
 

@@ -97,6 +97,55 @@ def search_users(query, access_token):
     return matches
 
 
+# ============================================================================
+# STRUCTURED DATA FUNCTIONS (for MCP and programmatic access)
+# ============================================================================
+
+def get_contacts_structured(access_token):
+    """
+    Get all personal contacts as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+
+    Returns:
+        list[dict]: List of contact dictionaries with schema:
+            {
+                'name': str,
+                'email': str,
+                'id': str,
+                'source': 'contact' | 'calendar'
+            }
+    """
+    # The existing get_unique_users() already returns clean structured data
+    return get_unique_users(access_token)
+
+
+def search_users_structured(access_token, query):
+    """
+    Search for users by name or email as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        query: Name or email to search for
+
+    Returns:
+        list[dict]: List of user dictionaries with schema:
+            {
+                'name': str,
+                'email': str,
+                'id': str,
+                'source': 'contact' | 'calendar'
+            }
+    """
+    # The existing search_users() already returns clean structured data
+    return search_users(query, access_token)
+
+
+# ============================================================================
+# CLI COMMAND FUNCTIONS
+# ============================================================================
+
 # Command handlers
 
 def cmd_list(args):

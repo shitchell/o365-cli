@@ -247,6 +247,211 @@ def search_messages(access_token, query, chats=None, count=50, since=None):
     return results
 
 
+# ============================================================================
+# STRUCTURED DATA FUNCTIONS (for MCP and programmatic access)
+# ============================================================================
+
+def get_chats_structured(access_token, count=50):
+    """
+    Get user's chats as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        count: Maximum number of chats to retrieve
+
+    Returns:
+        list[dict]: List of chat dictionaries with schema:
+            {
+                'id': str,
+                'chat_type': str,
+                'topic': str,
+                'display_name': str,
+                'members': list[dict],
+                'last_message_datetime': str (ISO 8601),
+                'last_message_preview': str
+            }
+    """
+    chats = get_chats(access_token, count)
+
+    structured_chats = []
+    for chat in chats:
+        members = []
+        for member in chat.get('members', []):
+            members.append({
+                'display_name': member.get('displayName', ''),
+                'email': member.get('email', ''),
+                'user_id': member.get('userId', '')
+            })
+
+        last_msg_preview = chat.get('lastMessagePreview', {})
+
+        structured_chats.append({
+            'id': chat.get('id', ''),
+            'chat_type': chat.get('chatType', ''),
+            'topic': chat.get('topic', ''),
+            'display_name': get_chat_display_name(chat),
+            'members': members,
+            'last_message_datetime': last_msg_preview.get('createdDateTime', ''),
+            'last_message_preview': last_msg_preview.get('body', {}).get('content', '')
+        })
+
+    return structured_chats
+
+
+def get_chat_messages_structured(access_token, chat_id, count=50, since=None):
+    """
+    Get messages from a chat as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        chat_id: Chat ID
+        count: Maximum number of messages to retrieve
+        since: Optional datetime to filter messages after
+
+    Returns:
+        list[dict]: List of message dictionaries with schema:
+            {
+                'id': str,
+                'created_datetime': str (ISO 8601),
+                'sender_name': str,
+                'sender_email': str,
+                'content': str,
+                'content_type': str,
+                'attachments': list[dict]
+            }
+    """
+    messages = get_chat_messages(access_token, chat_id, count, since)
+
+    structured_messages = []
+    for msg in messages:
+        sender = msg.get('from', {}).get('user', {})
+        body = msg.get('body', {})
+
+        # Clean HTML content
+        content = body.get('content', '')
+        content_type = body.get('contentType', 'text')
+        if content_type == 'html':
+            # Simple HTML stripping
+            content = re.sub(r'<[^>]+>', '', content)
+
+        structured_messages.append({
+            'id': msg.get('id', ''),
+            'created_datetime': msg.get('createdDateTime', ''),
+            'sender_name': sender.get('displayName', ''),
+            'sender_email': sender.get('userPrincipalName', ''),
+            'content': content,
+            'content_type': content_type,
+            'attachments': msg.get('attachments', [])
+        })
+
+    return structured_messages
+
+
+def send_message_structured(access_token, chat_id, content):
+    """
+    Send a message to a chat and return status (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        chat_id: Chat ID to send to
+        content: Message content (plain text)
+
+    Returns:
+        dict: Status dictionary with schema:
+            On success:
+                {
+                    'status': 'success',
+                    'message': str,
+                    'message_id': str,
+                    'created_datetime': str
+                }
+            On error:
+                {
+                    'status': 'error',
+                    'message': str,
+                    'error': str
+                }
+    """
+    try:
+        result = send_message(access_token, chat_id, content)
+
+        if result:
+            return {
+                'status': 'success',
+                'message': 'Message sent successfully',
+                'message_id': result.get('id', ''),
+                'created_datetime': result.get('createdDateTime', '')
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': 'Failed to send message',
+                'error': 'Send operation returned None'
+            }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': 'Failed to send message',
+            'error': str(e)
+        }
+
+
+def search_messages_structured(access_token, query, chats=None, count=50, since=None):
+    """
+    Search for messages as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        query: Search query string
+        chats: Optional list of chats to search in
+        count: Maximum number of results
+        since: Optional datetime to filter messages after
+
+    Returns:
+        list[dict]: List of search result dictionaries with schema:
+            {
+                'chat_id': str,
+                'chat_name': str,
+                'message_id': str,
+                'created_datetime': str,
+                'sender_name': str,
+                'sender_email': str,
+                'content': str,
+                'content_type': str
+            }
+    """
+    results = search_messages(access_token, query, chats, count, since)
+
+    structured_results = []
+    for chat, msg in results:
+        sender = msg.get('from', {}).get('user', {})
+        body = msg.get('body', {})
+
+        # Clean HTML content
+        content = body.get('content', '')
+        content_type = body.get('contentType', 'text')
+        if content_type == 'html':
+            content = re.sub(r'<[^>]+>', '', content)
+
+        structured_results.append({
+            'chat_id': chat.get('id', ''),
+            'chat_name': get_chat_display_name(chat),
+            'message_id': msg.get('id', ''),
+            'created_datetime': msg.get('createdDateTime', ''),
+            'sender_name': sender.get('displayName', ''),
+            'sender_email': sender.get('userPrincipalName', ''),
+            'content': content,
+            'content_type': content_type
+        })
+
+    return structured_results
+
+
+# ============================================================================
+# CLI COMMAND FUNCTIONS
+# ============================================================================
+
 # Command handlers
 
 def cmd_list(args):
