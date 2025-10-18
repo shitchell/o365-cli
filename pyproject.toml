@@ -7,12 +7,12 @@ name = "o365-cli"
 version = "1.0.0"
 description = "Unified command-line interface for managing Office365 email, calendar, and contacts"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Shaun Mitchell", email = "shaun.mitchell@trinoor.com"}
 ]
-keywords = ["office365", "email", "calendar", "contacts", "cli", "graph-api"]
+keywords = ["office365", "email", "calendar", "contacts", "cli", "graph-api", "mcp"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -22,12 +22,10 @@ classifiers = [
     "Topic :: Utilities",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
 ]
 dependencies = [
@@ -36,6 +34,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = [
+    "mcp>=1.2.0",
+]
 test = [
     "pytest>=7.0",
     "pytest-mock>=3.10",
@@ -51,6 +52,7 @@ dev = [
 
 [project.scripts]
 o365 = "o365.__main__:main"
+o365-mcp = "o365.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/shitchell/o365-cli"

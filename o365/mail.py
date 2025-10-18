@@ -272,6 +272,244 @@ def format_size(bytes_size):
     return f"{bytes_size:.1f}TB"
 
 
+# ============================================================================
+# STRUCTURED DATA FUNCTIONS (for MCP and programmatic access)
+# ============================================================================
+
+def get_messages_structured(access_token, folder='Inbox', unread=None, since=None,
+                           search=None, limit=None):
+    """
+    Get messages as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        folder: Mail folder name (default: 'Inbox')
+        unread: Filter by read status - True (unread only), False (read only), None (all)
+        since: Datetime object or None - filter messages received after this time
+        search: Search query string
+        limit: Maximum number of messages to return
+
+    Returns:
+        list[dict]: List of message dictionaries with schema:
+            {
+                'id': str,
+                'subject': str,
+                'from_email': str,
+                'from_name': str,
+                'received_datetime': str (ISO 8601),
+                'is_read': bool,
+                'has_attachments': bool,
+                'has_real_attachments': bool,  # Excludes inline images
+                'body_preview': str,
+                'is_external': bool,
+                'attachments': list[dict]  # Only if has_real_attachments
+            }
+    """
+    # Get user domain for external sender detection
+    user_domain = get_user_domain(access_token)
+
+    messages = []
+    for page in get_messages_stream(
+        access_token,
+        folder=folder,
+        max_count=limit,
+        since=since,
+        unread=unread,
+        search=search
+    ):
+        for msg in page:
+            # Parse sender info
+            from_field = msg.get('from', {}).get('emailAddress', {})
+            from_email = from_field.get('address', '')
+            from_name = from_field.get('name', '')
+
+            # Check if sender is external
+            is_ext = is_external_sender(from_email, user_domain)
+
+            # Check for real attachments (not inline images)
+            has_real_atts = False
+            real_attachments = []
+            for att in msg.get('attachments', []):
+                if not att.get('isInline', False):
+                    has_real_atts = True
+                    real_attachments.append({
+                        'id': att.get('id'),
+                        'name': att.get('name'),
+                        'content_type': att.get('contentType'),
+                        'size': att.get('size', 0),
+                        'is_inline': False
+                    })
+
+            # Build structured message
+            structured_msg = {
+                'id': msg['id'],
+                'subject': msg.get('subject', '(No subject)'),
+                'from_email': from_email,
+                'from_name': from_name,
+                'received_datetime': msg['receivedDateTime'],
+                'is_read': msg.get('isRead', True),
+                'has_attachments': msg.get('hasAttachments', False),
+                'has_real_attachments': has_real_atts,
+                'body_preview': msg.get('bodyPreview', ''),
+                'is_external': is_ext
+            }
+
+            # Only include attachments array if there are real attachments
+            if has_real_atts:
+                structured_msg['attachments'] = real_attachments
+
+            messages.append(structured_msg)
+
+    return messages
+
+
+def get_message_by_id_structured(access_token, message_id):
+    """
+    Get a single message by ID as structured data.
+
+    Args:
+        access_token: OAuth2 access token
+        message_id: Graph API message ID
+
+    Returns:
+        dict: Message dictionary with full body content and attachments
+    """
+    url = f"{GRAPH_API_BASE}/me/messages/{message_id}?$expand=attachments"
+    msg = make_graph_request(url, access_token)
+
+    if not msg:
+        return None
+
+    # Parse sender
+    from_field = msg.get('from', {}).get('emailAddress', {})
+    from_email = from_field.get('address', '')
+    from_name = from_field.get('name', '')
+
+    # Parse recipients
+    to_recipients = []
+    for r in msg.get('toRecipients', []):
+        to_recipients.append({
+            'email': r.get('emailAddress', {}).get('address', ''),
+            'name': r.get('emailAddress', {}).get('name', '')
+        })
+
+    # Get user domain
+    user_domain = get_user_domain(access_token)
+    is_ext = is_external_sender(from_email, user_domain)
+
+    # Parse body
+    body = msg.get('body', {})
+    body_content = body.get('content', '')
+    body_type = body.get('contentType', 'text')
+
+    # Parse attachments
+    all_attachments = []
+    real_attachments = []
+    inline_attachments = []
+
+    for att in msg.get('attachments', []):
+        att_dict = {
+            'id': att.get('id'),
+            'name': att.get('name'),
+            'content_type': att.get('contentType'),
+            'size': att.get('size', 0),
+            'is_inline': att.get('isInline', False),
+            'content_id': att.get('contentId', '')
+        }
+
+        all_attachments.append(att_dict)
+
+        if att_dict['is_inline']:
+            inline_attachments.append(att_dict)
+        else:
+            real_attachments.append(att_dict)
+
+    return {
+        'id': msg['id'],
+        'subject': msg.get('subject', '(No subject)'),
+        'from_email': from_email,
+        'from_name': from_name,
+        'to_recipients': to_recipients,
+        'received_datetime': msg['receivedDateTime'],
+        'is_read': msg.get('isRead', True),
+        'is_external': is_ext,
+        'body_content': body_content,
+        'body_type': body_type,
+        'attachments': real_attachments,
+        'inline_attachments': inline_attachments,
+        'has_attachments': len(all_attachments) > 0,
+        'has_real_attachments': len(real_attachments) > 0
+    }
+
+
+def send_email_structured(access_token, to_addresses, subject, body,
+                          cc_addresses=None, bcc_addresses=None, is_html=True):
+    """
+    Send an email and return status (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        to_addresses: List of recipient email addresses
+        subject: Email subject
+        body: Email body content
+        cc_addresses: Optional list of CC addresses
+        bcc_addresses: Optional list of BCC addresses
+        is_html: Whether body is HTML (default: True)
+
+    Returns:
+        dict: Status dictionary with:
+            {
+                'status': 'success' | 'error',
+                'message': str,
+                'error': str (only if status='error')
+            }
+    """
+    # Build message
+    message = {
+        'subject': subject,
+        'body': {
+            'contentType': 'HTML' if is_html else 'Text',
+            'content': body
+        },
+        'toRecipients': [
+            {'emailAddress': {'address': addr}}
+            for addr in to_addresses
+        ]
+    }
+
+    if cc_addresses:
+        message['ccRecipients'] = [
+            {'emailAddress': {'address': addr}}
+            for addr in cc_addresses
+        ]
+
+    if bcc_addresses:
+        message['bccRecipients'] = [
+            {'emailAddress': {'address': addr}}
+            for addr in bcc_addresses
+        ]
+
+    # Send via Graph API
+    url = f"{GRAPH_API_BASE}/me/sendMail"
+    result = make_graph_request(url, access_token, method='POST', data={'message': message})
+
+    if result is False:  # make_graph_request returns False on error
+        return {
+            'status': 'error',
+            'message': 'Failed to send email',
+            'error': 'Graph API request failed'
+        }
+
+    return {
+        'status': 'success',
+        'message': f'Email sent to {", ".join(to_addresses)}'
+    }
+
+
+# ============================================================================
+# CLI COMMAND FUNCTIONS
+# ============================================================================
+
 def cmd_read(args):
     """Handle 'o365 mail read' command using Graph API"""
     access_token = get_access_token()

@@ -309,6 +309,205 @@ def parse_vtt_transcript(vtt_content):
     return entries
 
 
+# ============================================================================
+# STRUCTURED DATA FUNCTIONS (for MCP and programmatic access)
+# ============================================================================
+
+def list_recordings_structured(access_token, since=None, before=None, organizer=None, count=50):
+    """
+    List meeting recordings as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        since: Optional datetime to filter recordings after
+        before: Optional datetime to filter recordings before
+        organizer: Optional organizer name/email filter
+        count: Maximum number of recordings to return
+
+    Returns:
+        list[dict]: List of recording dictionaries with schema:
+            {
+                'id': str,
+                'name': str,
+                'created_datetime': str (ISO 8601),
+                'size': int,
+                'size_formatted': str,
+                'mime_type': str,
+                'web_url': str,
+                'download_url': str
+            }
+    """
+    recordings = list_recordings(access_token, since, before, organizer, count)
+
+    structured_recordings = []
+    for rec in recordings:
+        structured_recordings.append({
+            'id': rec.get('id', ''),
+            'name': rec.get('name', ''),
+            'created_datetime': rec.get('createdDateTime', ''),
+            'size': rec.get('size', 0),
+            'size_formatted': format_size(rec.get('size', 0)),
+            'mime_type': rec.get('file', {}).get('mimeType', ''),
+            'web_url': rec.get('webUrl', ''),
+            'download_url': rec.get('@microsoft.graph.downloadUrl', '')
+        })
+
+    return structured_recordings
+
+
+def search_recordings_structured(access_token, query, since=None, organizer=None, count=50):
+    """
+    Search for meeting recordings as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        query: Search query (meeting name or keywords)
+        since: Optional datetime to filter recordings after
+        organizer: Optional organizer name/email filter
+        count: Maximum number of results
+
+    Returns:
+        list[dict]: List of recording dictionaries (same schema as list_recordings_structured)
+    """
+    recordings = search_recordings(access_token, query, since, organizer, count)
+
+    structured_recordings = []
+    for rec in recordings:
+        structured_recordings.append({
+            'id': rec.get('id', ''),
+            'name': rec.get('name', ''),
+            'created_datetime': rec.get('createdDateTime', ''),
+            'size': rec.get('size', 0),
+            'size_formatted': format_size(rec.get('size', 0)),
+            'mime_type': rec.get('file', {}).get('mimeType', ''),
+            'web_url': rec.get('webUrl', ''),
+            'download_url': rec.get('@microsoft.graph.downloadUrl', '')
+        })
+
+    return structured_recordings
+
+
+def download_recording_structured(access_token, item_id, dest_path, filename=None):
+    """
+    Download a meeting recording and return status (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        item_id: Recording file item ID
+        dest_path: Local destination directory
+        filename: Optional custom filename
+
+    Returns:
+        dict: Status dictionary with schema:
+            On success:
+                {
+                    'status': 'success',
+                    'message': str,
+                    'item_id': str,
+                    'file_path': str
+                }
+            On error:
+                {
+                    'status': 'error',
+                    'message': str,
+                    'error': str,
+                    'item_id': str
+                }
+    """
+    try:
+        success = download_recording(access_token, item_id, dest_path, filename)
+
+        if success:
+            # Get file metadata to find actual filename
+            url = f"{GRAPH_API_BASE}/me/drive/items/{item_id}"
+            item = make_graph_request(url, access_token)
+            actual_filename = filename or (item.get('name', f'recording_{item_id}.mp4') if item else f'recording_{item_id}.mp4')
+            file_path = str(Path(dest_path) / actual_filename)
+
+            return {
+                'status': 'success',
+                'message': 'Recording downloaded successfully',
+                'item_id': item_id,
+                'file_path': file_path
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': 'Failed to download recording',
+                'error': 'Download operation returned False',
+                'item_id': item_id
+            }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'message': 'Failed to download recording',
+            'error': str(e),
+            'item_id': item_id
+        }
+
+
+def get_transcript_structured(access_token, item_id):
+    """
+    Get transcript for a recording as structured data (for MCP/programmatic use).
+
+    Args:
+        access_token: OAuth2 access token
+        item_id: Recording file item ID
+
+    Returns:
+        dict: Transcript dictionary with schema:
+            On success:
+                {
+                    'status': 'success',
+                    'has_transcript': True,
+                    'entries': list[dict] with schema:
+                        {
+                            'timestamp': str,
+                            'text': str
+                        },
+                    'raw_vtt': str
+                }
+            On error/not found:
+                {
+                    'status': 'success' | 'error',
+                    'has_transcript': False,
+                    'message': str
+                }
+    """
+    try:
+        transcript = get_transcript(access_token, item_id)
+
+        if transcript:
+            # Parse the VTT transcript
+            entries = parse_vtt_transcript(transcript)
+
+            return {
+                'status': 'success',
+                'has_transcript': True,
+                'entries': [{'timestamp': ts, 'text': txt} for ts, txt in entries],
+                'raw_vtt': transcript
+            }
+        else:
+            return {
+                'status': 'success',
+                'has_transcript': False,
+                'message': 'No transcript found for this recording'
+            }
+
+    except Exception as e:
+        return {
+            'status': 'error',
+            'has_transcript': False,
+            'message': 'Failed to retrieve transcript',
+            'error': str(e)
+        }
+
+
+# ============================================================================
+# CLI COMMAND FUNCTIONS
+# ============================================================================
+
 # Command handlers
 
 def cmd_list(args):
