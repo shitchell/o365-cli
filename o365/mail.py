@@ -81,8 +81,15 @@ def get_messages_stream(access_token, folder='Inbox', max_count=None, since=None
     Yields:
         Lists of message objects (one list per page)
     """
-    # Build URL
-    url = f"{GRAPH_API_BASE}/me/mailFolders/{folder}/messages"
+    # Build URL - use /me/messages for search to search all folders, otherwise use specific folder
+    if search:
+        # When searching, search all messages across all folders
+        url = f"{GRAPH_API_BASE}/me/messages"
+    else:
+        # When not searching, use the specified folder
+        import urllib.parse
+        folder_encoded = urllib.parse.quote(folder)
+        url = f"{GRAPH_API_BASE}/me/mailFolders/{folder_encoded}/messages"
 
     # Build query parameters - use a reasonable page size for streaming
     # Graph API default is 10, but we'll use 50 for better performance
@@ -105,7 +112,7 @@ def get_messages_stream(access_token, folder='Inbox', max_count=None, since=None
         # Note: $orderby is not supported with $search in Graph API
         params['$search'] = f'"{search}"'
     else:
-        # Only add $orderby when NOT using $search
+        # Only add $orderby when not using $search
         params['$orderby'] = 'receivedDateTime desc'
 
     if filters:
@@ -653,6 +660,72 @@ def cmd_mark_read(args):
                 sys.exit(1)
 
 
+def cmd_search(args):
+    """Handle 'o365 mail search' command - dedicated search without filter conflicts"""
+    access_token = get_access_token()
+
+    # Build search query
+    query = args.query
+
+    # Parse --since if specified
+    since = None
+    if args.since:
+        try:
+            since = parse_since_expression(args.since)
+        except ValueError as e:
+            print(f"Error in --since: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Note: We cannot combine $search with $filter in Graph API
+    # So we do post-filtering on the results for --since
+    # This is less efficient but works around the API limitation
+
+    # Get user's domain for external sender detection
+    user_domain = get_user_domain(access_token)
+
+    # Stream and display messages as they're fetched
+    total_displayed = 0
+    total_filtered = 0
+
+    for page in get_messages_stream(
+        access_token,
+        folder='Inbox',  # Search will search all folders anyway when search param is set
+        max_count=args.count,
+        since=None,  # Don't pass since to API - we'll filter locally
+        unread=None,  # Don't filter by read status to avoid API conflicts
+        search=query
+    ):
+        for msg in page:
+            # Apply local filtering for --since if needed
+            if since:
+                received = parse_graph_datetime(msg['receivedDateTime'])
+                if received < since:
+                    total_filtered += 1
+                    continue
+
+            # Apply local filtering for --unread if needed
+            if args.unread and msg.get('isRead', True):
+                total_filtered += 1
+                continue
+            elif args.read and not msg.get('isRead', False):
+                total_filtered += 1
+                continue
+
+            display_message_summary(msg, user_domain)
+            total_displayed += 1
+
+    if total_displayed == 0:
+        if total_filtered > 0:
+            print(f"No messages found (filtered out {total_filtered} results)")
+        else:
+            print("No messages found")
+    else:
+        print(f"\nShowing {total_displayed} result(s)")
+        if total_filtered > 0:
+            print(f"(Filtered out {total_filtered} older/read messages)")
+        print(f"\nUse 'o365 mail read <ID>' to read a specific message")
+
+
 def cmd_download_attachment(args):
     """Handle 'o365 mail download-attachment' command using Graph API"""
     access_token = get_access_token()
@@ -817,6 +890,41 @@ For full options, see: python -m trinoor.email --help
     # Note: We're not adding arguments here because we pass everything through to trinoor.email
     # This allows trinoor.email to handle its own argument parsing
     send_parser.set_defaults(func=cmd_send)
+
+    # o365 mail search
+    search_parser = subparsers.add_parser(
+        'search',
+        help='Search emails across all folders',
+        description='Search emails using Microsoft Graph full-text search. '
+                   'This searches across subject, body, sender, and recipients. '
+                   'Unlike "read -s", this command works around Graph API limitations '
+                   'by doing local filtering for --since and --unread flags.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  o365 mail search "HSP-5077"                      # Search all emails for ticket number
+  o365 mail search "payment invoice"               # Search for multiple keywords
+  o365 mail search "project update" --since "1 week ago"  # Recent emails only
+  o365 mail search "meeting" --unread              # Unread emails matching search
+  o365 mail search "report" -n 50                  # Limit to 50 results
+
+Notes:
+  - Searches across all folders (not just Inbox)
+  - Searches subject, body, sender, and recipients
+  - --since and --unread do local filtering (less efficient but works)
+  - Results are not sorted by date when using search (Graph API limitation)
+"""
+    )
+    search_parser.add_argument('query', metavar='QUERY',
+                              help='Search query (searches subject, body, sender, recipients)')
+    search_parser.add_argument('-n', '--count', type=int, metavar='N',
+                              help='Maximum number of results to show (default: unlimited)')
+    search_parser.add_argument('--since', type=str, metavar='EXPR',
+                              help='Only show emails since this time (filtered locally)')
+    search_parser.add_argument('--unread', action='store_true',
+                              help='Show only unread emails (filtered locally)')
+    search_parser.add_argument('--read', action='store_true',
+                              help='Show only read emails (filtered locally)')
+    search_parser.set_defaults(func=cmd_search)
 
     # o365 mail download-attachment
     download_attachment_parser = subparsers.add_parser(
