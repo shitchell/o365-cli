@@ -487,8 +487,8 @@ def get_chat_messages_structured(access_token, chat_id, count=50, since=None):
 
     structured_messages = []
     for msg in messages:
-        sender = msg.get('from', {}).get('user', {})
-        body = msg.get('body', {})
+        sender = (msg.get('from') or {}).get('user') or {}
+        body = msg.get('body') or {}
 
         # Clean HTML content
         content = body.get('content', '')
@@ -500,7 +500,7 @@ def get_chat_messages_structured(access_token, chat_id, count=50, since=None):
         structured_messages.append({
             'id': msg.get('id', ''),
             'created_datetime': msg.get('createdDateTime', ''),
-            'sender_name': sender.get('displayName', ''),
+            'sender_name': sender.get('displayName', '') or 'System',
             'sender_email': sender.get('userPrincipalName', ''),
             'content': content,
             'content_type': content_type,
@@ -620,8 +620,8 @@ def search_messages_structured(access_token, query, chats=None, count=50, since=
             chat_id = chat.get('id', '')
             chat_name = get_chat_display_name(chat)
 
-        sender = msg.get('from', {}).get('user', {})
-        body = msg.get('body', {})
+        sender = (msg.get('from') or {}).get('user') or {}
+        body = msg.get('body') or {}
 
         # Clean HTML content
         content = body.get('content', '')
@@ -634,7 +634,7 @@ def search_messages_structured(access_token, query, chats=None, count=50, since=
             'chat_name': chat_name,
             'message_id': msg.get('id', ''),
             'created_datetime': msg.get('createdDateTime', ''),
-            'sender_name': sender.get('displayName', ''),
+            'sender_name': sender.get('displayName', '') or 'System',
             'sender_email': sender.get('userPrincipalName', ''),
             'content': content,
             'content_type': content_type
@@ -767,15 +767,15 @@ def cmd_read(args):
     print(f"\n💬 Messages ({len(messages)} shown):\n")
 
     for msg in messages:
-        sender = msg.get('from', {}).get('user', {}).get('displayName', 'Unknown')
+        sender = ((msg.get('from') or {}).get('user') or {}).get('displayName') or 'System'
         created = parse_graph_datetime(msg['createdDateTime']).astimezone(LOCAL_TZ)
         time_str = created.strftime('%Y-%m-%d %H:%M:%S')
 
-        body = msg.get('body', {}).get('content', '')
+        body_obj = msg.get('body') or {}
+        body = body_obj.get('content', '')
 
         # Clean up HTML if present
-        if msg.get('body', {}).get('contentType') == 'html':
-            # Simple HTML stripping
+        if body_obj.get('contentType') == 'html':
             body = re.sub(r'<[^>]+>', '', body)
 
         print(f"[{time_str}] {sender}")
@@ -922,7 +922,7 @@ def cmd_search(args):
             else:
                 chat, msg = item
 
-            sender_info = msg.get('from', {}).get('user', {})
+            sender_info = (msg.get('from') or {}).get('user') or {}
             sender_email = sender_info.get('userPrincipalName', '').lower()
             sender_name = sender_info.get('displayName', '').lower()
 
@@ -951,14 +951,14 @@ def cmd_search(args):
             chat, msg = item
             chat_id = chat['id']
             chat_name = get_chat_display_name(chat)
-        sender = msg.get('from', {}).get('user', {}).get('displayName', 'Unknown')
+        sender = ((msg.get('from') or {}).get('user') or {}).get('displayName') or 'System'
         created = parse_graph_datetime(msg['createdDateTime']).astimezone(LOCAL_TZ)
         time_str = created.strftime('%Y-%m-%d %H:%M:%S')
 
-        body = msg.get('body', {}).get('content', '')
+        body = (msg.get('body') or {}).get('content', '')
 
         # Clean up HTML if present
-        if msg.get('body', {}).get('contentType') == 'html':
+        if (msg.get('body') or {}).get('contentType') == 'html':
             body = re.sub(r'<[^>]+>', '', body)
 
         # Truncate long messages
