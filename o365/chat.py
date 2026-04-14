@@ -45,10 +45,13 @@ def get_chats(access_token, count=50):
     Returns:
         List of chat objects with members
     """
+    # Graph API limits $top to 50 for /me/chats
+    page_size = min(count, 50)
+
     url = f"{GRAPH_API_BASE}/me/chats"
     params = {
         '$expand': 'members',
-        '$top': str(count),
+        '$top': str(page_size),
         '$orderby': 'lastMessagePreview/createdDateTime desc'
     }
 
@@ -109,6 +112,67 @@ def filter_chats_by_user_or_name(chats, query, access_token):
             if user_principal in user_emails or query.lower() in display_name:
                 filtered.append(chat)
                 break
+
+    return filtered
+
+
+def find_chats_by_user_or_name(query, access_token):
+    """Search through all chats (with pagination) to find matches by user or name.
+
+    Unlike filter_chats_by_user_or_name which operates on a pre-fetched list,
+    this paginates through all chats until matches are found or all chats are
+    exhausted.
+
+    Args:
+        query: User name/email or chat topic to search for
+        access_token: OAuth2 access token
+
+    Returns:
+        List of matching chat objects
+    """
+    # Resolve user emails upfront
+    user_matches = search_users(query, access_token)
+    user_emails = [u['email'].lower() for u in user_matches] if user_matches else []
+    query_lower = query.lower()
+
+    url = f"{GRAPH_API_BASE}/me/chats"
+    params = {
+        '$expand': 'members',
+        '$top': '50',
+        '$orderby': 'lastMessagePreview/createdDateTime desc'
+    }
+    url = f"{url}?{urllib.parse.urlencode(params)}"
+
+    filtered = []
+    while url:
+        result = make_graph_request(url, access_token)
+        if not result:
+            break
+
+        for chat in result.get('value', []):
+            if chat is None:
+                continue
+
+            # Check topic
+            topic = (chat.get('topic') or '').lower()
+            if query_lower in topic:
+                filtered.append(chat)
+                continue
+
+            # Check members
+            for member in chat.get('members', []):
+                user_principal = (member.get('email') or '').lower()
+                display_name = (member.get('displayName') or '').lower()
+                if user_principal in user_emails or query_lower in display_name:
+                    filtered.append(chat)
+                    break
+
+        # If we found 1:1 matches, stop early -- no need to keep paginating
+        one_on_one = [c for c in filtered if c.get('chatType') == 'oneOnOne']
+        if one_on_one:
+            break
+
+        url = result.get('@odata.nextLink')
 
     return filtered
 
@@ -589,19 +653,18 @@ def cmd_list(args):
     """Handle 'o365 chat list' command"""
     access_token = get_access_token()
 
-    # Get chats
-    chats = get_chats(access_token, count=args.count or 50)
-
-    if not chats:
-        print("No chats found")
-        return
-
-    # Apply --with filter
+    # Get chats (use deep search when filtering by user)
     if args.with_user:
-        chats = filter_chats_by_user_or_name(chats, args.with_user, access_token)
+        chats = find_chats_by_user_or_name(args.with_user, access_token)
 
         if not chats:
             print(f"No chats found with '{args.with_user}'")
+            return
+    else:
+        chats = get_chats(access_token, count=args.count or 50)
+
+        if not chats:
+            print("No chats found")
             return
 
     # Apply --since filter
@@ -659,18 +722,23 @@ def cmd_read(args):
     if args.chat_id:
         chat_id = args.chat_id
     elif args.with_user:
-        # Find chat with user
-        chats = get_chats(access_token, count=50)
-        filtered = filter_chats_by_user_or_name(chats, args.with_user, access_token)
+        # Find chat with user (searches through all chats via pagination)
+        filtered = find_chats_by_user_or_name(args.with_user, access_token)
 
         if not filtered:
             print(f"Error: No chat found with '{args.with_user}'", file=sys.stderr)
             sys.exit(1)
 
+        # Prefer 1:1 chats over group/meeting chats
+        one_on_one = [c for c in filtered if c.get('chatType') == 'oneOnOne']
+        if one_on_one:
+            filtered = one_on_one
+
         if len(filtered) > 1:
-            print(f"Error: Multiple chats found with '{args.with_user}':", file=sys.stderr)
+            print(f"Multiple chats found with '{args.with_user}':", file=sys.stderr)
             for chat in filtered:
-                print(f"  - {chat['id']}: {get_chat_display_name(chat)}", file=sys.stderr)
+                chat_type = chat.get('chatType', 'unknown')
+                print(f"  - [{chat_type}] {get_chat_display_name(chat)}: {chat['id']}", file=sys.stderr)
             print("\nUse 'o365 chat read <chat-id>' with specific ID", file=sys.stderr)
             sys.exit(1)
 
@@ -723,18 +791,23 @@ def cmd_send(args):
     if args.chat_id:
         chat_id = args.chat_id
     elif args.to:
-        # Find chat with user
-        chats = get_chats(access_token, count=50)
-        filtered = filter_chats_by_user_or_name(chats, args.to, access_token)
+        # Find chat with user (searches through all chats via pagination)
+        filtered = find_chats_by_user_or_name(args.to, access_token)
 
         if not filtered:
             print(f"Error: No chat found with '{args.to}'", file=sys.stderr)
             sys.exit(1)
 
+        # Prefer 1:1 chats over group/meeting chats
+        one_on_one = [c for c in filtered if c.get('chatType') == 'oneOnOne']
+        if one_on_one:
+            filtered = one_on_one
+
         if len(filtered) > 1:
-            print(f"Error: Multiple chats found with '{args.to}':", file=sys.stderr)
+            print(f"Multiple chats found with '{args.to}':", file=sys.stderr)
             for chat in filtered:
-                print(f"  - {chat['id']}: {get_chat_display_name(chat)}", file=sys.stderr)
+                chat_type = chat.get('chatType', 'unknown')
+                print(f"  - [{chat_type}] {get_chat_display_name(chat)}: {chat['id']}", file=sys.stderr)
             print("\nUse 'o365 chat send --chat <chat-id>' with specific ID", file=sys.stderr)
             sys.exit(1)
 
@@ -806,9 +879,10 @@ def cmd_search(args):
             # If --chat was specified but Search API failed, use that specific chat
             chats = [chat]
         else:
-            chats = get_chats(access_token, count=50)
             if args.with_user:
-                chats = filter_chats_by_user_or_name(chats, args.with_user, access_token)
+                chats = find_chats_by_user_or_name(args.with_user, access_token)
+            else:
+                chats = get_chats(access_token, count=50)
 
         if not chats:
             print(f"No chats found with '{args.with_user}'")

@@ -26,15 +26,13 @@ class TestChatList:
 
     def test_list_with_user_filter(self, mock_access_token, mock_graph_api, sample_chat, capsys):
         """Test listing chats filtered by user"""
-        mock_graph_api.return_value = {'value': [sample_chat]}
+        with patch('o365.chat.find_chats_by_user_or_name') as mock_find:
+            mock_find.return_value = [sample_chat]
+            args = MagicMock()
+            args.with_user = "john"
+            args.since = None
+            args.count = None
 
-        args = MagicMock()
-        args.with_user = "john"
-        args.since = None
-        args.count = None
-
-        with patch('o365.chat.resolve_user') as mock_resolve:
-            mock_resolve.return_value = "john.doe@example.com"
             chat.cmd_list(args)
 
         captured = capsys.readouterr()
@@ -65,7 +63,7 @@ class TestChatRead:
                 {
                     'id': 'msg-1',
                     'from': {'user': {'displayName': 'John Doe'}},
-                    'body': {'content': 'Hello'},
+                    'body': {'content': 'Hello', 'contentType': 'text'},
                     'createdDateTime': '2025-01-15T10:00:00Z'
                 }
             ]
@@ -75,6 +73,7 @@ class TestChatRead:
         args.chat_id = "test-chat-id-123"
         args.with_user = None
         args.count = 50
+        args.since = None
 
         chat.cmd_read(args)
 
@@ -83,25 +82,28 @@ class TestChatRead:
 
     def test_read_chat_with_user(self, mock_access_token, mock_graph_api, sample_chat, capsys):
         """Test reading chat by user"""
-        mock_graph_api.return_value = {'value': [sample_chat]}
+        sample_chat_with_type = {**sample_chat, 'chatType': 'oneOnOne'}
 
-        args = MagicMock()
-        args.chat_id = None
-        args.with_user = "john"
-        args.count = 50
-
-        with patch('o365.chat.resolve_user') as mock_resolve:
-            mock_resolve.return_value = "john.doe@example.com"
-            with patch('o365.chat.get_messages') as mock_messages:
-                mock_messages.return_value = [
+        with patch('o365.chat.find_chats_by_user_or_name') as mock_find:
+            mock_find.return_value = [sample_chat_with_type]
+            mock_graph_api.return_value = {
+                'value': [
                     {
                         'id': 'msg-1',
                         'from': {'user': {'displayName': 'John'}},
-                        'body': {'content': 'Test'},
+                        'body': {'content': 'Test', 'contentType': 'text'},
                         'createdDateTime': '2025-01-15T10:00:00Z'
                     }
                 ]
-                chat.cmd_read(args)
+            }
+
+            args = MagicMock()
+            args.chat_id = None
+            args.with_user = "john"
+            args.count = 50
+            args.since = None
+
+            chat.cmd_read(args)
 
         captured = capsys.readouterr()
         assert "Test" in captured.out or "john" in captured.out.lower()
@@ -114,16 +116,24 @@ class TestChatSend:
         """Test sending message to user"""
         mock_graph_api.return_value = {'id': 'new-message-id'}
 
-        args = MagicMock()
-        args.to = "john"
-        args.chat = None
-        args.message = "Hello there"
+        sample_chat = {
+            'id': 'chat-id-123',
+            'chatType': 'oneOnOne',
+            'topic': None,
+            'members': [
+                {'displayName': 'John Doe', 'email': 'john@example.com', 'userId': 'u1'}
+            ]
+        }
 
-        with patch('o365.chat.resolve_user') as mock_resolve:
-            mock_resolve.return_value = "john.doe@example.com"
-            with patch('o365.chat.find_chat_with_user') as mock_find:
-                mock_find.return_value = "chat-id-123"
-                chat.cmd_send(args)
+        with patch('o365.chat.find_chats_by_user_or_name') as mock_find:
+            mock_find.return_value = [sample_chat]
+
+            args = MagicMock()
+            args.to = "john"
+            args.chat_id = None
+            args.message = "Hello there"
+
+            chat.cmd_send(args)
 
         captured = capsys.readouterr()
         assert "Message sent" in captured.out
@@ -134,7 +144,7 @@ class TestChatSend:
 
         args = MagicMock()
         args.to = None
-        args.chat = "chat-id-123"
+        args.chat_id = "chat-id-123"
         args.message = "Hello everyone"
 
         chat.cmd_send(args)
@@ -146,23 +156,32 @@ class TestChatSend:
 class TestChatSearch:
     """Tests for 'o365 chat search' command"""
 
-    def test_search_messages(self, mock_access_token, mock_graph_api, capsys):
+    def test_search_messages(self, mock_access_token, mock_graph_api, sample_chat, capsys):
         """Test searching messages"""
+        # First call: search API returns results
         mock_graph_api.return_value = {
-            'value': [
-                {
-                    'id': 'msg-1',
-                    'chatId': 'chat-1',
-                    'from': {'user': {'displayName': 'John'}},
-                    'body': {'content': 'deployment complete'},
-                    'createdDateTime': '2025-01-15T10:00:00Z'
-                }
-            ]
+            'value': [{
+                'hitsContainers': [{
+                    'hits': [{
+                        'resource': {
+                            'chatId': 'chat-1',
+                            'from': {'user': {'displayName': 'John'}},
+                            'body': {'content': 'deployment complete'},
+                            'createdDateTime': '2025-01-15T10:00:00Z',
+                            'summary': 'deployment complete'
+                        }
+                    }],
+                    'total': 1,
+                    'moreResultsAvailable': False
+                }]
+            }]
         }
 
         args = MagicMock()
         args.query = "deployment"
+        args.chat_id = None
         args.with_user = None
+        args.from_user = None
         args.since = None
         args.count = 50
 
@@ -173,15 +192,26 @@ class TestChatSearch:
 
     def test_search_no_results(self, mock_access_token, mock_graph_api, capsys):
         """Test searching when no matches found"""
-        mock_graph_api.return_value = {'value': []}
+        # Search API returns empty results
+        mock_graph_api.return_value = {
+            'value': [{
+                'hitsContainers': [{
+                    'hits': [],
+                    'total': 0,
+                    'moreResultsAvailable': False
+                }]
+            }]
+        }
 
         args = MagicMock()
         args.query = "nonexistent"
+        args.chat_id = None
         args.with_user = None
+        args.from_user = None
         args.since = None
         args.count = 50
 
         chat.cmd_search(args)
 
         captured = capsys.readouterr()
-        assert "No messages found" in captured.out or "0 messages" in captured.out
+        assert "No messages found" in captured.out or "0 results" in captured.out
