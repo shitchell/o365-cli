@@ -46,7 +46,7 @@ def get_calendar_owners(access_token):
         return owners
 
     for calendar in result.get('value', []):
-        owner = calendar.get('owner', {})
+        owner = calendar.get('owner') or {}
         owner_name = owner.get('name', '')
         owner_email = owner.get('address', '')
 

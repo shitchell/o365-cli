@@ -6,6 +6,7 @@ List, search, download, upload, and share files across personal OneDrive and sha
 
 import sys
 import os
+import json
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -293,14 +294,21 @@ def upload_file(access_token, source_path, dest_path, drive_id=None, overwrite=F
 
     # For small files (<4MB), use simple upload
     if file_size < 4 * 1024 * 1024:
-        # Remove leading/trailing slashes from dest_path
+        # Remove leading/trailing slashes from dest_path; URL-encode each
+        # path segment (preserve slashes) so spaces/special chars work.
         dest_path = dest_path.strip('/')
-        filename = source.name
+        filename = urllib.parse.quote(source.name, safe='')
 
         if dest_path:
-            url = f"{GRAPH_API_BASE}/drives/{drive_id}/root:/{dest_path}/{filename}:/content"
+            encoded_dest = urllib.parse.quote(dest_path, safe='/')
+            url = f"{GRAPH_API_BASE}/drives/{drive_id}/root:/{encoded_dest}/{filename}:/content"
         else:
             url = f"{GRAPH_API_BASE}/drives/{drive_id}/root:/{filename}:/content"
+
+        # Graph defaults to "replace" on PUT; pass "fail" explicitly when the
+        # caller didn't ask to overwrite, so a name conflict returns 409.
+        conflict = 'replace' if overwrite else 'fail'
+        url += f"?@microsoft.graph.conflictBehavior={conflict}"
 
         headers = {
             'Authorization': f'Bearer {access_token}',
@@ -314,7 +322,7 @@ def upload_file(access_token, source_path, dest_path, drive_id=None, overwrite=F
             req = urllib.request.Request(url, data=data, headers=headers, method='PUT')
 
             with urllib.request.urlopen(req) as response:
-                return eval(response.read().decode())
+                return json.loads(response.read().decode())
 
         except Exception as e:
             print(f"Error uploading file: {e}", file=sys.stderr)
