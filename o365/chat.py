@@ -254,25 +254,51 @@ def get_chat_messages(access_token, chat_id, count=50, since=None, fetch_all=Fal
     return list(reversed(messages))
 
 
-def send_message(access_token, chat_id, content):
+def send_message(access_token, chat_id, content, attachments=None):
     """Send a message to a chat
 
     Args:
         access_token: OAuth2 access token
         chat_id: Chat ID to send to
-        content: Message content (plain text)
+        content: Message content (plain text, or HTML if attachments are present)
+        attachments: Optional list of attachment dicts, each with keys:
+            'id' (GUID), 'name' (filename), 'web_url' (OneDrive webUrl).
 
     Returns:
         Created message object or None on error
     """
     url = f"{GRAPH_API_BASE}/chats/{chat_id}/messages"
 
-    message = {
-        'body': {
-            'contentType': 'text',
-            'content': content
+    if attachments:
+        # Teams requires HTML body referencing each attachment by its GUID,
+        # plus a parallel attachments array with contentType=reference.
+        import html as _html
+        body_text = _html.escape(content or '').replace('\n', '<br>')
+        attach_html = ''.join(
+            f'<attachment id="{a["id"]}"></attachment>' for a in attachments
+        )
+        message = {
+            'body': {
+                'contentType': 'html',
+                'content': f'{body_text}{attach_html}',
+            },
+            'attachments': [
+                {
+                    'id': a['id'],
+                    'contentType': 'reference',
+                    'contentUrl': a['web_url'],
+                    'name': a['name'],
+                }
+                for a in attachments
+            ],
         }
-    }
+    else:
+        message = {
+            'body': {
+                'contentType': 'text',
+                'content': content,
+            }
+        }
 
     return make_graph_request(url, access_token, method='POST', data=message)
 
@@ -785,7 +811,16 @@ def cmd_read(args):
 
 def cmd_send(args):
     """Handle 'o365 chat send' command"""
+    import uuid
+    from pathlib import Path
+    from .files import upload_file
+
     access_token = get_access_token()
+
+    files = args.files or []
+    if not args.message and not files:
+        print("Error: Must specify -m/--message and/or -f/--file", file=sys.stderr)
+        sys.exit(1)
 
     # Resolve chat ID
     if args.chat_id:
@@ -816,11 +851,58 @@ def cmd_send(args):
         print("Error: Must specify --chat or --to", file=sys.stderr)
         sys.exit(1)
 
-    # Send message
-    result = send_message(access_token, chat_id, args.message)
+    # Upload any attached files to OneDrive (Teams convention: place them in
+    # "Microsoft Teams Chat Files/" so they live alongside files the Teams
+    # client itself uploads), then build reference attachments for the message.
+    attachments = []
+    for local_path in files:
+        src = Path(local_path)
+        if not src.exists():
+            print(f"Error: File not found: {local_path}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Uploading {src.name}...", file=sys.stderr)
+        uploaded = upload_file(
+            access_token,
+            str(src),
+            'Microsoft Teams Chat Files',
+            overwrite=True,
+        )
+        if not uploaded or not uploaded.get('id'):
+            print(f"Error: Failed to upload {src.name}", file=sys.stderr)
+            sys.exit(1)
+
+        # Teams attachment cards require a sharing-link URL, not the raw
+        # driveItem webUrl, or clicking the file gives "File Not Found".
+        item_id = uploaded['id']
+        drive_id = uploaded.get('parentReference', {}).get('driveId')
+        link_path = (
+            f"/drives/{drive_id}/items/{item_id}/createLink"
+            if drive_id else f"/me/drive/items/{item_id}/createLink"
+        )
+        link = make_graph_request(
+            link_path, access_token, method='POST',
+            data={'type': 'view', 'scope': 'organization'},
+        )
+        share_url = (link or {}).get('link', {}).get('webUrl')
+        if not share_url:
+            print(f"Error: Failed to create sharing link for {src.name}", file=sys.stderr)
+            sys.exit(1)
+
+        attachments.append({
+            'id': str(uuid.uuid4()),
+            'name': uploaded.get('name', src.name),
+            'web_url': share_url,
+        })
+
+    # Send message (with attachments if any)
+    result = send_message(access_token, chat_id, args.message or '', attachments=attachments)
 
     if result:
-        print("✓ Message sent successfully")
+        if attachments:
+            print(f"✓ Message sent successfully ({len(attachments)} attachment(s))")
+        else:
+            print("✓ Message sent successfully")
     else:
         print("Error: Failed to send message", file=sys.stderr)
         sys.exit(1)
@@ -1025,8 +1107,12 @@ def setup_parser(subparsers):
                             help='Chat ID to send to')
     send_parser.add_argument('--to', type=str, metavar='USER',
                             help='Send to chat with specific user or group chat name')
-    send_parser.add_argument('-m', '--message', type=str, required=True,
-                            help='Message content to send')
+    send_parser.add_argument('-m', '--message', type=str,
+                            help='Message content to send (optional if -f is given)')
+    send_parser.add_argument('-f', '--file', dest='files', action='append',
+                            metavar='PATH',
+                            help='Attach a local file (repeatable). '
+                                 'Uploaded to "Microsoft Teams Chat Files/" in your OneDrive.')
 
     send_parser.set_defaults(func=cmd_send)
 
