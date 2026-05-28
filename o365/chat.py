@@ -744,9 +744,15 @@ def cmd_read(args):
     """Handle 'o365 chat read' command"""
     access_token = get_access_token()
 
-    # Resolve chat ID
+    # Resolve chat ID (positional first, then --chat flag form)
+    chat_id_from_flag = getattr(args, 'chat_id_flag', None)
+    if args.chat_id and chat_id_from_flag and args.chat_id != chat_id_from_flag:
+        print("Error: provide chat ID via positional OR --chat, not both", file=sys.stderr)
+        sys.exit(2)
     if args.chat_id:
         chat_id = args.chat_id
+    elif chat_id_from_flag:
+        chat_id = chat_id_from_flag
     elif args.with_user:
         # Find chat with user (searches through all chats via pagination)
         filtered = find_chats_by_user_or_name(args.with_user, access_token)
@@ -1087,6 +1093,8 @@ def setup_parser(subparsers):
     )
 
     read_parser.add_argument('chat_id', nargs='?', help='Chat ID to read from')
+    read_parser.add_argument('--chat', dest='chat_id_flag', type=str, metavar='CHAT_ID',
+                            help='Chat ID (flag form, mirrors `chat send --chat`)')
     read_parser.add_argument('--with', dest='with_user', type=str, metavar='USER',
                             help='Read chat with specific user or group chat name')
     read_parser.add_argument('-n', '--count', type=int, metavar='N',
