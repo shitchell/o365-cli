@@ -4,6 +4,7 @@ Chat management commands for Office365
 List, read, send, and search Microsoft Teams chats.
 """
 
+import argparse
 import sys
 import re
 import urllib.parse
@@ -326,38 +327,89 @@ def send_message(access_token, chat_id, content, attachments=None):
     return make_graph_request(url, access_token, method='POST', data=message)
 
 
-def search_messages_via_api(access_token, query, count=50, chat_id=None, since=None):
-    """Search for messages using Microsoft Graph Search API
+def _normalize_search_hit(hit):
+    """Convert a Search API hit to the shape /me/chats/{id}/messages returns.
 
-    Uses POST /search/query endpoint which searches server-side and is much faster
-    than fetching all messages locally. If chat_id is specified, filters results
-    to only that chat.
+    The Search API uses `from.emailAddress.name/address` (mail-style),
+    omits `body`, and gives a relevance-snippet in `summary`. Local
+    messages use `from.user.displayName/id`, full HTML body, no summary.
+    Normalize to the local shape — using `summary` as the body content
+    (which is actually nicer for search results, since it's already
+    excerpted around the match) — so downstream display + JSON code
+    doesn't have to switch on origin.
+    """
+    resource = hit.get('resource', {})
+    from_addr = (resource.get('from') or {}).get('emailAddress') or {}
+    return {
+        'id': resource.get('id'),
+        'createdDateTime': resource.get('createdDateTime'),
+        'from': {
+            'user': {
+                'displayName': from_addr.get('name'),
+                'id': None,
+                'userPrincipalName': from_addr.get('address'),
+            }
+        },
+        'body': {
+            'contentType': 'text',
+            'content': hit.get('summary') or '',
+        },
+        'webLink': resource.get('webLink'),
+        'chatId': resource.get('chatId'),
+        '_from_search_api': True,
+    }
 
-    Args:
-        access_token: OAuth2 access token
-        query: Search query string
-        count: Maximum number of matching results to return
-        chat_id: Optional chat ID to filter results to
-        since: Optional datetime to filter messages after
+
+def _build_chat_kql(query, from_user=None, since=None):
+    """Build a KQL query string for the Graph Search API.
+
+    `query` may be empty/None — we substitute "*" so Graph still accepts
+    the request, enabling pure filter-only searches like "all messages
+    from Luke this week".
+
+    Sender filter uses KQL `from:"..."`. Date filter uses `sent>=YYYY-MM-DD`
+    (Graph's keyword is `sent`, not `created`/`received` — confirmed
+    empirically; `created>=` returns 0 hits even when there are matches).
+    """
+    parts = []
+    parts.append(query.strip() if query and query.strip() else '*')
+    if from_user:
+        parts.append(f'from:"{from_user}"')
+    if since is not None:
+        parts.append(f'sent>={since.strftime("%Y-%m-%d")}')
+    return ' '.join(parts)
+
+
+def search_messages_via_api(access_token, query, count=50, chat_id=None,
+                            since=None, from_user=None):
+    """Search for messages using Microsoft Graph Search API (POST /search/query).
+
+    Requires ChannelMessage.Read.All. With that scope, this is ~25-100x
+    faster than the local fallback because the search is server-side and
+    supports KQL: wildcards (release*), boolean (client OR release),
+    phrases ("client release"), and property filters (from:, sent>=,
+    subject:).
+
+    `from_user` and `since` are translated into KQL operators and pushed
+    server-side rather than post-filtered. `chat_id` is still applied
+    client-side because Graph's KQL doesn't expose a chat-ID filter.
 
     Returns:
-        List of (chat_id, message) tuples
+        List of (chat_id, message) tuples, or None on HTTP error.
     """
-    # Search API for chatMessages requires beta endpoint
     url = "https://graph.microsoft.com/beta/search/query"
 
     results = []
     from_index = 0
-    page_size = 25  # Graph API default for search
+    page_size = 25
+    query_string = _build_chat_kql(query, from_user=from_user, since=since)
 
-    # Keep fetching until we have enough matching results
     while len(results) < count:
-        # Build search request
         search_request = {
             "requests": [{
                 "entityTypes": ["chatMessage"],
                 "query": {
-                    "queryString": query
+                    "queryString": query_string,
                 },
                 "from": from_index,
                 "size": page_size
@@ -380,16 +432,15 @@ def search_messages_via_api(access_token, query, count=50, chat_id=None, since=N
         if not hits:
             break  # No more results
 
-        # Process each hit
+        # Process each hit. Normalize to the same shape as messages from
+        # /me/chats/{id}/messages so the downstream display + JSON code
+        # doesn't need a second case.
         for hit in hits:
             resource = hit.get('resource', {})
             msg_chat_id = resource.get('chatId')
 
-            # Filter by chat_id if specified
             if chat_id and msg_chat_id != chat_id:
                 continue
-
-            # Filter by date if specified
             if since:
                 created_str = resource.get('createdDateTime')
                 if created_str:
@@ -397,8 +448,8 @@ def search_messages_via_api(access_token, query, count=50, chat_id=None, since=N
                     if created < since:
                         continue
 
-            # Add to results
-            results.append((msg_chat_id, resource))
+            normalized = _normalize_search_hit(hit)
+            results.append((msg_chat_id, normalized))
 
             if len(results) >= count:
                 break
@@ -981,10 +1032,9 @@ def cmd_send(args):
 
 
 def cmd_search(args):
-    """Handle 'o365 chat search' command"""
+    """Handle 'o365 chat search' command."""
     access_token = get_access_token()
 
-    # Parse --since filter
     since_date = None
     if args.since:
         try:
@@ -993,16 +1043,23 @@ def cmd_search(args):
             print(f"Error in --since: {e}", file=sys.stderr)
             sys.exit(1)
 
-    # Determine search count
     search_count = args.count or 50
 
-    # Try Search API first if --chat is specified or no --with filter
-    # Search API is much faster but requires ChannelMessage.Read.All permission
-    # Fall back to local search if Search API fails due to permissions
-    use_local_search = False
+    # Require *some* filter — empty positional + no --from + no --since
+    # would dump the entire chat history with KQL '*', which is rarely
+    # what anyone wants and would burn quota.
+    if not args.query and not args.from_user and not args.since and not args.with_user and not args.chat_id:
+        print("Error: provide a query, or --from / --since / --with / --chat filter.",
+              file=sys.stderr)
+        sys.exit(2)
 
+    results = None
+    used_local = False
+
+    # Path 1: Search API (fast, server-side KQL). Used unless --with_user
+    # is specified, since that needs a chat-membership filter that KQL
+    # doesn't expose.
     if args.chat_id or not args.with_user:
-        # Validate chat ID exists if specified
         if args.chat_id:
             url = f"{GRAPH_API_BASE}/chats/{args.chat_id}"
             chat = make_graph_request(url, access_token)
@@ -1010,95 +1067,90 @@ def cmd_search(args):
                 print(f"Error: Chat not found: {args.chat_id}", file=sys.stderr)
                 sys.exit(1)
 
-        # Try Search API (fast server-side search)
         results = search_messages_via_api(
             access_token,
             args.query,
             count=search_count,
             chat_id=args.chat_id,
-            since=since_date
+            since=since_date,
+            from_user=args.from_user,
         )
 
-        # If Search API returns empty list, it might have failed - fall back to local search
-        # (Note: make_graph_request returns None on error, which causes empty results)
-        if results is None or (args.chat_id and len(results) == 0):
-            # Likely failed due to permissions, fall back to local search
-            print(f"Note: Search API requires ChannelMessage.Read.All permission. Using slower local search...", file=sys.stderr)
-            use_local_search = True
-            results = None
+        # `None` = actual HTTP error (typically 403 because
+        # ChannelMessage.Read.All isn't granted). An empty *list* is a
+        # legitimate "no matches" result; don't fall back on that.
+        if results is None:
+            print(
+                "Note: Graph Search API unavailable (likely missing "
+                "ChannelMessage.Read.All admin grant). Falling back to "
+                "local enumeration — this is much slower.",
+                file=sys.stderr,
+            )
+            used_local = True
 
-    if use_local_search or args.with_user:
-        # Use local search when filtering by --with (need to get specific chats first)
+    if used_local or args.with_user:
         if args.chat_id:
-            # If --chat was specified but Search API failed, use that specific chat
             chats = [chat]
+        elif args.with_user:
+            chats = find_chats_by_user_or_name(args.with_user, access_token)
         else:
-            if args.with_user:
-                chats = find_chats_by_user_or_name(args.with_user, access_token)
-            else:
-                chats = get_chats(access_token, count=50)
+            chats = get_chats(access_token, count=50)
 
         if not chats:
             print(f"No chats found with '{args.with_user}'")
             return
 
-        # When searching a specific chat, fetch all messages for thorough search
         fetch_all = bool(args.chat_id)
-        results = search_messages(access_token, args.query, chats=chats, count=search_count, since=since_date, fetch_all_from_chat=fetch_all)
+        results = search_messages(
+            access_token, args.query or '', chats=chats,
+            count=search_count, since=since_date, fetch_all_from_chat=fetch_all,
+        )
 
-    # Resolve --from user if specified
-    from_user = None
-    if args.from_user:
-        matches = search_users(args.from_user, access_token)
+        # Local path doesn't push --from to KQL; apply the post-filter here
+        # using the resolved user (catches both displayName + email matches).
+        if args.from_user and results:
+            matches = search_users(args.from_user, access_token)
+            if not matches:
+                print(f"Error: No user found matching '{args.from_user}'", file=sys.stderr)
+                sys.exit(1)
+            if len(matches) > 1:
+                print(f"Error: Ambiguous --from '{args.from_user}' matches {len(matches)} users:", file=sys.stderr)
+                for match in matches:
+                    print(f"  - {match['name']} ({match['email']})", file=sys.stderr)
+                sys.exit(1)
+            from_user = matches[0]
+            from_email = from_user['email'].lower()
+            from_name = from_user['name'].lower()
+            filtered = []
+            for item in results:
+                msg = item[1]
+                sender_info = (msg.get('from') or {}).get('user') or {}
+                sender_email = sender_info.get('userPrincipalName', '').lower()
+                sender_name = sender_info.get('displayName', '').lower()
+                if sender_email == from_email or sender_name == from_name:
+                    filtered.append(item)
+            results = filtered
 
-        if not matches:
-            print(f"Error: No user found matching '{args.from_user}'", file=sys.stderr)
-            sys.exit(1)
+    # Search API hits arrive with chat_id only; build a name map so output
+    # is human-readable. One /me/chats call covers the common case.
+    chat_name_map = {}
+    if any(isinstance(item[0], str) for item in results):
+        chats_resp = get_chats(access_token, count=50)
+        chat_name_map = {c['id']: get_chat_display_name(c) for c in chats_resp}
 
-        if len(matches) > 1:
-            print(f"Error: Ambiguous --from '{args.from_user}' matches {len(matches)} users:", file=sys.stderr)
-            for match in matches:
-                print(f"  - {match['name']} ({match['email']})", file=sys.stderr)
-            sys.exit(1)
-
-        from_user = matches[0]
-
-    # Filter by --from user if specified
-    if from_user:
-        filtered_results = []
-        from_email = from_user['email'].lower()
-        from_name = from_user['name'].lower()
-
-        for item in results:
-            # Handle both formats: (chat_id, msg) from Search API or (chat, msg) from local search
-            if isinstance(item[0], str):
-                chat_id, msg = item
-            else:
-                chat, msg = item
-
-            sender_info = (msg.get('from') or {}).get('user') or {}
-            sender_email = sender_info.get('userPrincipalName', '').lower()
-            sender_name = sender_info.get('displayName', '').lower()
-
-            # Match by email or name
-            if sender_email == from_email or sender_name == from_name:
-                filtered_results.append(item)
-
-        results = filtered_results
+    def _name_for(item):
+        if isinstance(item[0], str):
+            return chat_name_map.get(item[0]) or 'Unknown Chat'
+        return get_chat_display_name(item[0])
 
     if is_json_mode(args):
         json_items = []
         for item in results:
-            if isinstance(item[0], str):
-                chat_id, msg = item
-                chat_name = None
-            else:
-                chat, msg = item
-                chat_id = chat['id']
-                chat_name = get_chat_display_name(chat)
+            chat_id = item[0] if isinstance(item[0], str) else item[0]['id']
+            msg = item[1]
             entry = _serialize_chat_message(msg)
             entry['chat_id'] = chat_id
-            entry['chat_name'] = chat_name
+            entry['chat_name'] = _name_for(item)
             json_items.append(entry)
         emit_json({
             'query': args.query,
@@ -1118,14 +1170,9 @@ def cmd_search(args):
     print(f"\n🔍 Search results for '{args.query}' ({len(results)} found):\n")
 
     for i, item in enumerate(results):
-        # Handle both formats: (chat_id, msg) from Search API or (chat, msg) from local search
-        if isinstance(item[0], str):
-            chat_id, msg = item
-            chat_name = "Unknown Chat"  # Search API doesn't provide chat details
-        else:
-            chat, msg = item
-            chat_id = chat['id']
-            chat_name = get_chat_display_name(chat)
+        chat_id = item[0] if isinstance(item[0], str) else item[0]['id']
+        msg = item[1]
+        chat_name = _name_for(item)
         sender = ((msg.get('from') or {}).get('user') or {}).get('displayName') or 'System'
         created = parse_graph_datetime(msg['createdDateTime']).astimezone(LOCAL_TZ)
         time_str = created.strftime('%Y-%m-%d %H:%M:%S')
@@ -1221,10 +1268,30 @@ def setup_parser(subparsers):
         'search',
         parents=[_parent],
         help='Search chat messages',
-        description='Search for messages in Microsoft Teams chats.'
+        description='Search for messages in Microsoft Teams chats. '
+                    'Uses the Graph Search API (server-side KQL) when '
+                    'ChannelMessage.Read.All is granted; falls back to '
+                    'local enumeration otherwise. KQL operators '
+                    '(release*, "exact phrase", a OR b, from:luke, '
+                    'sent>=2026-05-25, subject:"...") work in the query '
+                    'string when on the Search API path. Note: Graph uses '
+                    '`sent`, not `created` or `received`, for the date '
+                    'keyword.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  o365 chat search "deployment"
+  o365 chat search "release*"                  # KQL wildcard
+  o365 chat search --from "Luke Hands"         # filter-only (no query needed)
+  o365 chat search --from luke --since "1 week ago"
+  o365 chat search "build OR deploy" --from luke
+"""
     )
 
-    search_parser.add_argument('query', help='Search query string')
+    # query is optional — `--from`/`--since` alone are a valid search now.
+    search_parser.add_argument('query', nargs='?', default=None,
+                              help='Search query (KQL when Search API is available; '
+                                   'literal substring on local fallback). Optional — '
+                                   'omit to filter by --from/--since only.')
     search_parser.add_argument('--chat', dest='chat_id', type=str, metavar='CHAT_ID',
                               help='Search only in specific chat ID')
     search_parser.add_argument('--with', dest='with_user', type=str, metavar='USER',

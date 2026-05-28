@@ -132,6 +132,14 @@ def load_config():
                         "https://graph.microsoft.com/ChatMessage.Send"
                     ])
 
+                # Optional .All scope (requires admin consent). Unlocks
+                # server-side chat search via POST /search/query; without it
+                # `chat search` falls back to slow local enumeration.
+                if parser.getboolean('scopes', 'chat.all', fallback=False):
+                    scopes.append(
+                        "https://graph.microsoft.com/ChannelMessage.Read.All"
+                    )
+
                 # Files scopes: base scopes if files=true OR files.all=true
                 files_enabled = parser.getboolean('scopes', 'files', fallback=True)
                 files_all_enabled = parser.getboolean('scopes', 'files.all', fallback=False)

@@ -8,6 +8,19 @@ flag/subcommand spellings continue to work.
 
 ### Added
 
+- **`chat.all` scope toggle + KQL-powered chat search.** Adds
+  `ChannelMessage.Read.All` to the requested scopes when `chat.all = true`
+  is set in `[scopes]`. With admin consent granted, `o365 chat search`
+  uses Graph's server-side Search API instead of enumerating every chat
+  locally — **52s → ~3s** in a Trinoor-sized tenant (~17× speedup). The
+  query string accepts full KQL: wildcards (`release*`), boolean
+  (`a OR b`, `a AND b`), phrase (`"client release"`), and property
+  filters (`from:luke`, `sent>=2026-05-25`, `subject:"..."`). `--from`
+  and `--since` are pushed into KQL automatically. Positional query is
+  now optional — `o365 chat search --from "Luke" --since "1 week ago"`
+  works without one. Search-API result shape is normalized to match the
+  local format so display + JSON output don't care which path served the
+  result.
 - **SharePoint site drive enumeration** in `o365 files drives`. Once the
   tenant admin has granted `Sites.Read.All` / `Files.Read.All`, the
   default `files drives` still shows only personal + direct-membership
