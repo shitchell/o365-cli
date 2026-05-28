@@ -13,6 +13,10 @@
 - ✅ Automatic token refresh (5-minute buffer)
 - ✅ User-friendly error messages
 
+## Future ideas
+
+- **Local chat-message cache** — not currently needed since KQL Search API queries return in 0.5–3s, but would earn its keep for offline use, bulk analytics, KQL-inexpressible patterns (regex / attachment-presence / display-name change detection), and rate-limit insurance for heavy automation. Revisit if any of those use cases shows up.
+
 ## Known Limitations ⚠️
 
 ### OneDrive/Files - Shared Drives
