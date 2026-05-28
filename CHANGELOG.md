@@ -8,6 +8,8 @@ flag/subcommand spellings continue to work.
 
 ### Added
 
+- **`chat search --context N`** — shows N messages immediately preceding
+  each hit, for thread context. One extra Graph call per hit.
 - **`chat.all` scope toggle + KQL-powered chat search.** Adds
   `ChannelMessage.Read.All` to the requested scopes when `chat.all = true`
   is set in `[scopes]`. With admin consent granted, `o365 chat search`
@@ -53,6 +55,15 @@ flag/subcommand spellings continue to work.
 
 ### Changed
 
+- **Chat display now decodes HTML entities.** All chat-message render
+  paths (`chat read`, `chat search`, JSON serializers) now run
+  `html.unescape()` after stripping tags, so `&nbsp;` / `&amp;` /
+  `&quot;` etc. appear as their real characters instead of literal
+  entity strings.
+- **Search-snippet whitespace is collapsed.** The Graph Search API's
+  `summary` field packs attachment filenames against body text with
+  long runs of whitespace; `chat search` now collapses runs of 2+
+  whitespace into a single space for display only.
 - **`mail send` now sends via Microsoft Graph (`/me/sendMail`)** instead
   of shelling out to `python -m trinoor.email`. The SMTP credentials in
   `~/.env` are no longer required — the same OAuth token authenticates

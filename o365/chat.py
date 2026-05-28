@@ -7,6 +7,7 @@ List, read, send, and search Microsoft Teams chats.
 import argparse
 import sys
 import re
+import html
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
@@ -327,6 +328,43 @@ def send_message(access_token, chat_id, content, attachments=None):
     return make_graph_request(url, access_token, method='POST', data=message)
 
 
+def _fetch_preceding_messages(access_token, chat_id, hit_time_str, n):
+    """Fetch up to n messages immediately preceding hit_time in the chat.
+
+    Used by `chat search --context N`. One Graph call per hit (worst
+    case); skips silently on failure so a single dropped lookup doesn't
+    sink the whole results display.
+    """
+    if n <= 0:
+        return []
+    hit_time = parse_graph_datetime(hit_time_str)
+
+    # Pull a small window and filter locally — Graph chat-message $filter
+    # support is limited, so it's simpler to grab the recent batch and
+    # walk it. We need slightly more than n because the hit itself is in
+    # the response and other messages after the hit may be in the window.
+    url = f"{GRAPH_API_BASE}/me/chats/{chat_id}/messages?$top={max(n * 3, 20)}"
+    resp = make_graph_request(url, access_token)
+    if not resp:
+        return []
+
+    preceding = []
+    for m in resp.get('value', []):
+        mt_str = m.get('createdDateTime')
+        if not mt_str:
+            continue
+        try:
+            mt = parse_graph_datetime(mt_str)
+        except Exception:
+            continue
+        if mt < hit_time:
+            preceding.append((mt, m))
+
+    # Sort ascending, take the last n (closest to the hit)
+    preceding.sort(key=lambda x: x[0])
+    return [m for _, m in preceding[-n:]]
+
+
 def _normalize_search_hit(hit):
     """Convert a Search API hit to the shape /me/chats/{id}/messages returns.
 
@@ -595,7 +633,7 @@ def get_chat_messages_structured(access_token, chat_id, count=50, since=None):
         content_type = body.get('contentType', 'text')
         if content_type == 'html':
             # Simple HTML stripping
-            content = re.sub(r'<[^>]+>', '', content)
+            content = html.unescape(re.sub(r'<[^>]+>', '', content))
 
         structured_messages.append({
             'id': msg.get('id', ''),
@@ -727,7 +765,7 @@ def search_messages_structured(access_token, query, chats=None, count=50, since=
         content = body.get('content', '')
         content_type = body.get('contentType', 'text')
         if content_type == 'html':
-            content = re.sub(r'<[^>]+>', '', content)
+            content = html.unescape(re.sub(r'<[^>]+>', '', content))
 
         structured_results.append({
             'chat_id': chat_id,
@@ -835,7 +873,7 @@ def _serialize_chat_message(msg):
     body_obj = msg.get('body') or {}
     body_content = body_obj.get('content') or ''
     if body_obj.get('contentType') == 'html':
-        body_content = re.sub(r'<[^>]+>', '', body_content)
+        body_content = html.unescape(re.sub(r'<[^>]+>', '', body_content))
     sender = ((msg.get('from') or {}).get('user') or {}) or {}
     return {
         'id': msg.get('id'),
@@ -925,7 +963,7 @@ def cmd_read(args):
 
         # Clean up HTML if present
         if body_obj.get('contentType') == 'html':
-            body = re.sub(r'<[^>]+>', '', body)
+            body = html.unescape(re.sub(r'<[^>]+>', '', body))
 
         print(f"[{time_str}] {sender}")
         print(f"  {body}")
@@ -1181,7 +1219,14 @@ def cmd_search(args):
 
         # Clean up HTML if present
         if (msg.get('body') or {}).get('contentType') == 'html':
-            body = re.sub(r'<[^>]+>', '', body)
+            body = html.unescape(re.sub(r'<[^>]+>', '', body))
+
+        # Search API `summary` snippets pack attachment names against body
+        # text with long runs of whitespace (e.g. "WCDE.apk1        client
+        # 2.5.8"). Collapse 2+ whitespace into a single space — snippets
+        # are display-only so we don't need to preserve original spacing.
+        if msg.get('_from_search_api'):
+            body = re.sub(r'\s{2,}', ' ', body).strip()
 
         # Truncate long messages
         if len(body) > 200:
@@ -1192,6 +1237,25 @@ def cmd_search(args):
         print(f"Name: {chat_name}")
         print(f"From: {sender}")
         print(body)
+
+        # Context: N preceding messages from the same chat
+        if getattr(args, 'context', 0):
+            ctx = _fetch_preceding_messages(
+                access_token, chat_id, msg['createdDateTime'], args.context,
+            )
+            if ctx:
+                print()
+                print(f"  --- {len(ctx)} preceding message(s) ---")
+                for cm in ctx:
+                    csender = ((cm.get('from') or {}).get('user') or {}).get('displayName') or 'System'
+                    ctime = parse_graph_datetime(cm['createdDateTime']).astimezone(LOCAL_TZ)
+                    cbody = (cm.get('body') or {}).get('content', '')
+                    if (cm.get('body') or {}).get('contentType') == 'html':
+                        cbody = html.unescape(re.sub(r'<[^>]+>', '', cbody))
+                    cbody = re.sub(r'\s+', ' ', cbody).strip()
+                    if len(cbody) > 120:
+                        cbody = cbody[:117] + '...'
+                    print(f"  [{ctime:%H:%M:%S}] {csender}: {cbody}")
 
         # Add separator between results (but not after the last one)
         if i < len(results) - 1:
@@ -1284,6 +1348,9 @@ def setup_parser(subparsers):
   o365 chat search --from "Luke Hands"         # filter-only (no query needed)
   o365 chat search --from luke --since "1 week ago"
   o365 chat search "build OR deploy" --from luke
+  o365 chat search "rollout" --context 3       # show 3 preceding msgs per hit
+
+Sort order: results are newest-first (Graph relevance + recency).
 """
     )
 
@@ -1302,6 +1369,10 @@ def setup_parser(subparsers):
                               help='Search messages since this time (git-style format)')
     search_parser.add_argument('-n', '--count', type=int, metavar='N',
                               help='Number of results to show (default: 50)')
+    search_parser.add_argument('--context', type=int, default=0, metavar='N',
+                              help='Show N messages immediately preceding each '
+                                   'hit (for thread context). Default: 0. Adds '
+                                   'one Graph call per hit.')
 
     search_parser.set_defaults(func=cmd_search)
 
