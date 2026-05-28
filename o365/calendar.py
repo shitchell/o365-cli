@@ -725,7 +725,8 @@ def setup_parser(subparsers):
     # o365 calendar list
     list_parser = subparsers.add_parser(
         'list',
-        help='List calendar events',
+        aliases=['list-events', 'events', 'ls'],
+        help='List calendar events (aliases: list-events, events, ls)',
         description='List calendar events from Office365 with flexible filtering.',
         epilog="""
 Time Format:

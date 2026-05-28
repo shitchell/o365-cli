@@ -688,7 +688,8 @@ def setup_parser(subparsers):
     # o365 recordings list
     list_parser = subparsers.add_parser(
         'list',
-        help='List meeting recordings',
+        aliases=['ls'],
+        help='List meeting recordings (alias: ls)',
         description='List Microsoft Teams meeting recordings.'
     )
 

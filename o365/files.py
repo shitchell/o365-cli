@@ -937,7 +937,8 @@ def setup_parser(subparsers):
     # o365 files list
     list_parser = subparsers.add_parser(
         'list',
-        help='List files and folders',
+        aliases=['ls'],
+        help='List files and folders (alias: ls)',
         description='List files and folders in OneDrive or SharePoint.'
     )
 

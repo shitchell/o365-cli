@@ -1099,7 +1099,8 @@ def setup_parser(subparsers):
     # o365 mail read
     read_parser = subparsers.add_parser(
         'read',
-        help='List and read emails via Graph API',
+        aliases=['list', 'ls'],
+        help='List and read emails via Graph API (aliases: list, ls)',
         description='List and read emails via Microsoft Graph API.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
