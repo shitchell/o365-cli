@@ -178,23 +178,46 @@ def find_chats_by_user_or_name(query, access_token):
 
 
 def get_chat_display_name(chat):
-    """Get a human-readable name for a chat
+    """Return a stable, human-readable label for a chat.
 
-    For group chats: use topic
-    For 1:1 chats: use other participant's name
+    Rules, in order:
+      1. If the chat has an explicit topic (named group/meeting), use it.
+      2. For oneOnOne chats, use the other participant's name.
+      3. For group/meeting chats without a topic, return
+         "Group(<n>): A, B, C +N more" listing non-self members sorted by
+         name. This avoids the previous bug where Graph's member ordering
+         varied between calls and a different participant was shown each
+         time for the same chat.
     """
-    # Group chat with topic
     if chat.get('topic'):
         return chat['topic']
 
-    # 1:1 chat - find the other participant
-    members = chat.get('members', [])
-    for member in members:
-        # Skip yourself
-        if member.get('userId') and not member.get('displayName', '').endswith('(You)'):
-            return member.get('displayName', 'Unknown')
+    members = chat.get('members') or []
+    others = [
+        (m.get('displayName') or m.get('email') or 'Unknown')
+        for m in members
+        if m.get('userId') and not (m.get('displayName') or '').endswith('(You)')
+    ]
+    others_sorted = sorted(others, key=lambda s: s.lower())
 
-    return 'Unknown Chat'
+    chat_type = chat.get('chatType') or ''
+    if chat_type == 'oneOnOne':
+        return others_sorted[0] if others_sorted else 'Unknown Chat'
+
+    if not others_sorted:
+        return 'Unknown Chat'
+
+    total = len(others_sorted)
+    shown_n = 3
+    shown = others_sorted[:shown_n]
+    label = ", ".join(shown)
+    if total > shown_n:
+        label += f" +{total - shown_n} more"
+
+    # Use the total member count (including self) for the size indicator,
+    # which matches how Teams shows participant counts.
+    total_members = len([m for m in members if m.get('userId')])
+    return f"Group({total_members}): {label}"
 
 
 def get_chat_messages(access_token, chat_id, count=50, since=None, fetch_all=False):
