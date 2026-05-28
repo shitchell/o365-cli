@@ -8,6 +8,14 @@ flag/subcommand spellings continue to work.
 
 ### Added
 
+- **SharePoint site drive enumeration** in `o365 files drives`. Once the
+  tenant admin has granted `Sites.Read.All` / `Files.Read.All`, the
+  default `files drives` still shows only personal + direct-membership
+  drives (fast), but `-a`/`--all-sites` walks `/sites?search=*` and lists
+  every accessible document library with the originating site name.
+  `resolve_drive()` auto-falls-back to site enumeration if a name isn't
+  found in the fast set, so `files list --drive "Engineering Team"`
+  works without a separate discovery step.
 - **Global `--json` flag** on every list/read/search/info command. Works
   in either position: `o365 --json mail read` or `o365 mail read --json`.
   Coverage: `mail read`, `mail search`, `chat list`, `chat read`,
