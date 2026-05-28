@@ -56,6 +56,83 @@ def is_external_sender(sender_email, user_domain):
     return sender_domain != user_domain
 
 
+# Graph well-known mail folder slugs. Keys are normalized display names
+# (lowercased); values are the slugs Graph accepts in URLs.
+_WELL_KNOWN_FOLDERS = {
+    'inbox': 'inbox',
+    'sent items': 'sentitems',
+    'sent': 'sentitems',
+    'sentitems': 'sentitems',
+    'drafts': 'drafts',
+    'deleted items': 'deleteditems',
+    'deleteditems': 'deleteditems',
+    'trash': 'deleteditems',
+    'junk email': 'junkemail',
+    'junkemail': 'junkemail',
+    'junk': 'junkemail',
+    'spam': 'junkemail',
+    'outbox': 'outbox',
+    'archive': 'archive',
+    'conversation history': 'conversationhistory',
+    'conversationhistory': 'conversationhistory',
+    'clutter': 'clutter',
+    'scheduled': 'scheduled',
+    'msgfolderroot': 'msgfolderroot',
+}
+
+_FOLDER_RESOLVE_CACHE = {}
+
+
+def resolve_folder(folder, access_token):
+    """Resolve a user-supplied folder string to something Graph will accept.
+
+    Order of precedence:
+      1. Cached resolution from this process.
+      2. Looks-like-a-Graph-folder-ID (starts with AAMk, long) -> pass through.
+      3. Well-known display name -> Graph slug (Inbox, "Sent Items", etc.).
+      4. Otherwise look up displayName via /me/mailFolders.
+    """
+    if not folder:
+        return 'inbox'
+
+    if folder in _FOLDER_RESOLVE_CACHE:
+        return _FOLDER_RESOLVE_CACHE[folder]
+
+    # Pass through long Graph IDs unchanged
+    if folder.startswith('AAMk') and len(folder) > 60:
+        _FOLDER_RESOLVE_CACHE[folder] = folder
+        return folder
+
+    # Map well-known names
+    slug = _WELL_KNOWN_FOLDERS.get(folder.lower())
+    if slug:
+        _FOLDER_RESOLVE_CACHE[folder] = slug
+        return slug
+
+    # Look up by displayName. OData filter values need URL-encoding because
+    # the URL contains spaces and quotes that the http client won't accept raw.
+    import urllib.parse as _up
+    escaped = folder.replace("'", "''")
+    query = _up.urlencode({
+        '$filter': f"displayName eq '{escaped}'",
+        '$top': '1',
+        '$select': 'id,displayName',
+    })
+    result = make_graph_request(f"/me/mailFolders?{query}", access_token)
+    if result and result.get('value'):
+        folder_id = result['value'][0]['id']
+        _FOLDER_RESOLVE_CACHE[folder] = folder_id
+        return folder_id
+
+    print(
+        f"Error: mail folder {folder!r} not found. "
+        "Use a well-known name (Inbox, \"Sent Items\", Drafts, \"Deleted Items\", "
+        "\"Junk Email\", Outbox, Archive) or the folder's Graph ID.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def parse_graph_datetime(dt_str):
     """Parse Microsoft Graph datetime format"""
     import re
@@ -536,7 +613,7 @@ def cmd_read(args):
         return
 
     # Otherwise, list messages with filters
-    folder = args.folder or 'Inbox'
+    folder = resolve_folder(args.folder, access_token)
     # If -n not specified, show all messages (None = unlimited)
     max_count = args.count
 
