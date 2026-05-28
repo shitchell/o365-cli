@@ -16,15 +16,20 @@
 ## Known Limitations ⚠️
 
 ### OneDrive/Files - Shared Drives
-**Status**: Personal OneDrive only. Shared SharePoint sites/team drives require admin consent.
+**Status**: Works once tenant admin grants the `.All` scopes.
 
-**Issue**: The permissions `Files.Read.All`, `Files.ReadWrite.All`, `Sites.Read.All`, and `Sites.ReadWrite.All` are blocked by tenant-level Azure AD consent policies in some organizations, even though they're marked as "Admin consent required: No" in the Azure Portal.
+The `Files.Read.All` / `Files.ReadWrite.All` / `Sites.Read.All` /
+`Sites.ReadWrite.All` permissions may be blocked by tenant-level Azure AD
+consent policies in some organizations, even though they're marked as
+"Admin consent required: No" in the Azure Portal. An admin can grant
+consent via Azure Portal → App registrations → API permissions → "Grant
+admin consent for [Organization]".
 
-**Workaround**: Organization admins can grant consent via Azure Portal → App registrations → API permissions → "Grant admin consent for [Organization]"
-
-**Current functionality**:
-- ✅ Personal OneDrive: List, search, download, upload
-- ❌ Shared drives: Requires admin consent for `.All` scopes
+After admin consent + a `o365 auth login` re-auth:
+- `o365 files drives` shows personal + direct-membership drives (fast)
+- `o365 files drives -a` / `--all-sites` enumerates every SharePoint site
+- `o365 files list --drive "Site Name"` auto-falls-back to site lookup if
+  the name isn't in the fast set
 
 ---
 

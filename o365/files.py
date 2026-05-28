@@ -16,78 +16,136 @@ from .common import get_access_token, make_graph_request, GRAPH_API_BASE, global
 from .calendar import parse_since_expression
 
 
-def get_drives(access_token):
-    """Get all available drives (personal OneDrive and shared sites)
+def get_drives(access_token, include_sites=False):
+    """Get drives accessible to the authenticated user.
 
     Args:
-        access_token: OAuth2 access token
+        access_token: OAuth2 access token.
+        include_sites: When True, also enumerate every SharePoint site the
+            user can see via /sites?search=* and pull drives from each.
+            Requires Sites.Read.All. In a typical Trinoor tenant this adds
+            ~50 sites and tens of API calls (10-30 seconds). Off by default
+            because most workflows only need personal + member drives.
 
     Returns:
-        List of drive objects
+        List of drive objects. Site-derived drives carry an extra
+        '_site_name' key so callers can tell where they came from.
     """
     drives = []
 
-    # Get personal OneDrive
+    # Personal OneDrive
     personal_drive = make_graph_request('/me/drive', access_token)
     if personal_drive:
         drives.append(personal_drive)
 
-    # Get all accessible drives (includes shared sites)
+    # Drives the user has direct membership in (returns personal + a small
+    # set of associated libraries; does NOT enumerate SharePoint sites).
     url = f"{GRAPH_API_BASE}/me/drives"
-
     while url:
         result = make_graph_request(url, access_token)
         if not result:
             break
-
         drives.extend(result.get('value', []))
         url = result.get('@odata.nextLink')
 
-    # Deduplicate by ID
+    if include_sites:
+        drives.extend(_enumerate_site_drives(access_token))
+
+    # Deduplicate by ID. Preserve the first occurrence so personal/member
+    # entries (which lack _site_name) win over later site-derived dupes.
     seen_ids = set()
     unique_drives = []
     for drive in drives:
         if drive['id'] not in seen_ids:
             seen_ids.add(drive['id'])
             unique_drives.append(drive)
-
     return unique_drives
 
 
+def _enumerate_site_drives(access_token):
+    """Walk /sites?search=* and yield drives from each. Slow; requires Sites.Read.All."""
+    out = []
+    site_url = "/sites?search=*&$select=id,displayName&$top=200"
+    while site_url:
+        page = make_graph_request(site_url, access_token)
+        if not page:
+            break
+        for site in page.get('value', []):
+            site_id = site.get('id')
+            site_name = site.get('displayName')
+            if not site_id:
+                continue
+            drives_resp = make_graph_request(f"/sites/{site_id}/drives", access_token)
+            for d in (drives_resp or {}).get('value', []):
+                d['_site_name'] = site_name
+                out.append(d)
+        next_link = page.get('@odata.nextLink')
+        # make_graph_request accepts both absolute URLs and /-prefixed paths;
+        # strip the prefix so it doesn't get prepended twice on the next loop.
+        if next_link and next_link.startswith(GRAPH_API_BASE):
+            site_url = next_link[len(GRAPH_API_BASE):]
+        else:
+            site_url = next_link
+    return out
+
+
 def resolve_drive(drive_query, access_token):
-    """Resolve a drive name or ID to a drive object
+    """Resolve a drive name or ID to a drive object.
 
-    Args:
-        drive_query: Drive name (fuzzy match) or ID
-        access_token: OAuth2 access token
-
-    Returns:
-        Drive object or None if not found
+    Tries the fast set first (/me/drive + /me/drives). If no match is
+    found and the query doesn't look like a Graph drive ID, falls back
+    to enumerating SharePoint site drives (slow) so users can refer to
+    e.g. --drive "Engineering Team" without a separate `--all-sites`
+    discovery step.
     """
-    drives = get_drives(access_token)
+    fast = get_drives(access_token, include_sites=False)
 
-    # Try exact ID match first
-    for drive in drives:
+    # Exact ID match first
+    for drive in fast:
         if drive['id'] == drive_query:
             return drive
 
-    # Try fuzzy name match
-    query_lower = drive_query.lower()
-    matches = []
-    for drive in drives:
-        name = drive.get('name', '').lower()
-        if query_lower in name:
-            matches.append(drive)
-
+    # Fuzzy name match within the fast set
+    matches = _match_drives(fast, drive_query)
     if len(matches) == 1:
         return matches[0]
-    elif len(matches) > 1:
-        print(f"Error: Multiple drives match '{drive_query}':", file=sys.stderr)
-        for drive in matches:
-            print(f"  - {drive['name']} (ID: {drive['id']})", file=sys.stderr)
-        print("\nPlease specify a more specific name or use the drive ID", file=sys.stderr)
+    if len(matches) > 1:
+        return _report_ambiguous(matches, drive_query)
+
+    # Fall back to site enumeration only when nothing matched in the fast set.
+    # ID-shaped queries don't benefit from this (Graph IDs are exact-only).
+    if drive_query.startswith('b!') and len(drive_query) > 40:
         return None
 
+    print(f"Searching SharePoint sites for '{drive_query}'...", file=sys.stderr)
+    full = fast + _enumerate_site_drives(access_token)
+    matches = _match_drives(full, drive_query)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        return _report_ambiguous(matches, drive_query)
+    return None
+
+
+def _match_drives(drives, query):
+    """Fuzzy substring match on drive name and (if present) site name."""
+    q = query.lower()
+    out = []
+    for d in drives:
+        name = (d.get('name') or '').lower()
+        site = (d.get('_site_name') or '').lower()
+        if q in name or q in site:
+            out.append(d)
+    return out
+
+
+def _report_ambiguous(matches, query):
+    """Print a disambiguation hint and return None."""
+    print(f"Error: Multiple drives match '{query}':", file=sys.stderr)
+    for d in matches:
+        site = f" [in site: {d['_site_name']}]" if d.get('_site_name') else ''
+        print(f"  - {d.get('name')}{site} (ID: {d['id']})", file=sys.stderr)
+    print("\nPlease specify a more specific name or use the drive ID", file=sys.stderr)
     return None
 
 
@@ -680,6 +738,7 @@ def _serialize_drive(drive):
         'name': drive.get('name'),
         'drive_type': drive.get('driveType'),
         'owner': owner,
+        'site_name': drive.get('_site_name'),
         'web_url': drive.get('webUrl'),
     }
 
@@ -705,12 +764,16 @@ def cmd_drives(args):
     """Handle 'o365 files drives' command"""
     access_token = get_access_token()
 
-    drives = get_drives(access_token)
+    include_sites = getattr(args, 'all_sites', False)
+    if include_sites:
+        print("Enumerating SharePoint sites (may take 10-30s)...", file=sys.stderr)
+    drives = get_drives(access_token, include_sites=include_sites)
 
     if is_json_mode(args):
         emit_json({
             'drives': [_serialize_drive(d) for d in drives],
             'count': len(drives),
+            'included_sites': include_sites,
         })
         return
 
@@ -718,26 +781,32 @@ def cmd_drives(args):
         print("No drives found")
         return
 
-    print(f"\n📁 Available Drives ({len(drives)}):\n")
+    header = f"\n📁 Available Drives ({len(drives)})"
+    if not include_sites:
+        header += "  — add -a/--all-sites to enumerate every accessible SharePoint site"
+    print(header + ":\n")
 
     if args.verbose:
-        print(f"{'Name':<40} {'Type':<20} {'ID':<40}")
-        print("=" * 100)
+        print(f"{'Name':<35} {'Type':<16} {'Site':<25} {'ID':<40}")
+        print("=" * 120)
 
         for drive in drives:
-            name = drive.get('name', 'Unknown')[:38]
-            drive_type = drive.get('driveType', 'unknown')[:18]
+            name = (drive.get('name') or 'Unknown')[:33]
+            drive_type = (drive.get('driveType') or 'unknown')[:14]
+            site = (drive.get('_site_name') or '-')[:23]
             drive_id = drive['id']
-
-            print(f"{name:<40} {drive_type:<20} {drive_id:<40}")
+            print(f"{name:<35} {drive_type:<16} {site:<25} {drive_id:<40}")
     else:
         for drive in drives:
             name = drive.get('name', 'Unknown')
             drive_type = drive.get('driveType', 'unknown')
             owner = drive.get('owner', {}).get('user', {}).get('displayName', '')
+            site = drive.get('_site_name')
 
-            if owner:
-                print(f"  • {name} ({drive_type}) - owned by {owner}")
+            if site:
+                print(f"  • {name} ({drive_type}) — in site: {site}")
+            elif owner:
+                print(f"  • {name} ({drive_type}) — owned by {owner}")
             else:
                 print(f"  • {name} ({drive_type})")
 
@@ -987,6 +1056,11 @@ def setup_parser(subparsers):
 
     drives_parser.add_argument('-v', '--verbose', action='store_true',
                               help='Show drive IDs and details')
+    drives_parser.add_argument('-a', '--all-sites', dest='all_sites',
+                              action='store_true',
+                              help='Also enumerate every accessible SharePoint site '
+                                   '(slow; ~10-30s in a Trinoor-sized tenant). '
+                                   'Without this, only personal + direct-membership drives are listed.')
 
     drives_parser.set_defaults(func=cmd_drives)
 
