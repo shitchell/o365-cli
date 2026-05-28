@@ -9,7 +9,7 @@ import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
-from .common import get_access_token, make_graph_request, GRAPH_API_BASE
+from .common import get_access_token, make_graph_request, GRAPH_API_BASE, global_parent_parser, is_json_mode, emit_json
 from .contacts import search_users
 from .calendar import parse_since_expression
 
@@ -732,6 +732,13 @@ def cmd_list(args):
             print(f"Error in --since: {e}", file=sys.stderr)
             sys.exit(1)
 
+    if is_json_mode(args):
+        emit_json({
+            'chats': [_serialize_chat(c) for c in chats],
+            'count': len(chats),
+        })
+        return
+
     # Display chats
     print(f"\n💬 Chats ({len(chats)} shown):\n")
     print(f"{'Type':<5} {'Name':<40} {'ID':<50}")
@@ -741,26 +748,54 @@ def cmd_list(args):
         chat_id = chat['id']
         chat_type = chat.get('chatType', 'unknown')
         name = get_chat_display_name(chat)[:38]
-
-        # Map chat type to emoji
         type_emoji = {
             'oneOnOne': '👤',
             'group': '👥',
             'meeting': '📅',
         }.get(chat_type, '❓')
-
-        # Get last message preview
-        last_msg_preview = chat.get('lastMessagePreview', {})
-        last_msg_time = last_msg_preview.get('createdDateTime')
-        if last_msg_time:
-            dt = parse_graph_datetime(last_msg_time).astimezone(LOCAL_TZ)
-            last_msg_str = dt.strftime('%Y-%m-%d %H:%M')
-        else:
-            last_msg_str = ''
-
         print(f"{type_emoji:<5} {name:<40} {chat_id:<50}")
 
     print(f"\nUse 'o365 chat read <chat-id>' to read messages")
+
+
+def _serialize_chat(chat):
+    """Serialize a Graph chat object for --json output."""
+    members = [
+        {
+            'display_name': m.get('displayName'),
+            'email': m.get('email'),
+            'user_id': m.get('userId'),
+        }
+        for m in (chat.get('members') or [])
+    ]
+    last = chat.get('lastMessagePreview') or {}
+    return {
+        'id': chat.get('id'),
+        'type': chat.get('chatType'),
+        'topic': chat.get('topic'),
+        'display_name': get_chat_display_name(chat),
+        'members': members,
+        'last_message_at': last.get('createdDateTime'),
+    }
+
+
+def _serialize_chat_message(msg):
+    """Serialize a Graph chat message for --json output."""
+    body_obj = msg.get('body') or {}
+    body_content = body_obj.get('content') or ''
+    if body_obj.get('contentType') == 'html':
+        body_content = re.sub(r'<[^>]+>', '', body_content)
+    sender = ((msg.get('from') or {}).get('user') or {}) or {}
+    return {
+        'id': msg.get('id'),
+        'created': msg.get('createdDateTime'),
+        'sender': {
+            'display_name': sender.get('displayName'),
+            'id': sender.get('id'),
+        },
+        'body': body_content,
+        'body_content_type': body_obj.get('contentType'),
+    }
 
 
 def cmd_read(args):
@@ -813,6 +848,14 @@ def cmd_read(args):
 
     # Get messages
     messages = get_chat_messages(access_token, chat_id, count=args.count or 50, since=since)
+
+    if is_json_mode(args):
+        emit_json({
+            'chat_id': chat_id,
+            'messages': [_serialize_chat_message(m) for m in messages],
+            'count': len(messages),
+        })
+        return
 
     if not messages:
         print("No messages found")
@@ -1043,6 +1086,27 @@ def cmd_search(args):
 
         results = filtered_results
 
+    if is_json_mode(args):
+        json_items = []
+        for item in results:
+            if isinstance(item[0], str):
+                chat_id, msg = item
+                chat_name = None
+            else:
+                chat, msg = item
+                chat_id = chat['id']
+                chat_name = get_chat_display_name(chat)
+            entry = _serialize_chat_message(msg)
+            entry['chat_id'] = chat_id
+            entry['chat_name'] = chat_name
+            json_items.append(entry)
+        emit_json({
+            'query': args.query,
+            'matches': json_items,
+            'count': len(json_items),
+        })
+        return
+
     if not results:
         if args.from_user:
             print(f"No messages found matching '{args.query}' from {from_user['name']}")
@@ -1092,9 +1156,12 @@ def cmd_search(args):
 def setup_parser(subparsers):
     """Setup argparse subcommands for chat"""
 
+    _parent = global_parent_parser()
+
     # o365 chat list
     list_parser = subparsers.add_parser(
         'list',
+        parents=[_parent],
         help='List chats',
         description='List Microsoft Teams chats.'
     )
@@ -1111,6 +1178,7 @@ def setup_parser(subparsers):
     # o365 chat read
     read_parser = subparsers.add_parser(
         'read',
+        parents=[_parent],
         help='Read messages from a chat',
         description='Read messages from a Microsoft Teams chat.'
     )
@@ -1130,6 +1198,7 @@ def setup_parser(subparsers):
     # o365 chat send
     send_parser = subparsers.add_parser(
         'send',
+        parents=[_parent],
         help='Send a message to a chat',
         description='Send a message to a Microsoft Teams chat.'
     )
@@ -1150,6 +1219,7 @@ def setup_parser(subparsers):
     # o365 chat search
     search_parser = subparsers.add_parser(
         'search',
+        parents=[_parent],
         help='Search chat messages',
         description='Search for messages in Microsoft Teams chats.'
     )

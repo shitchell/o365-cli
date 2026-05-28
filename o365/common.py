@@ -4,6 +4,7 @@ Common utilities for Office365 CLI
 Shared constants, API helpers, and utility functions used across all commands.
 """
 
+import argparse
 import json
 import sys
 import os
@@ -333,6 +334,34 @@ def make_graph_request(url, access_token, method="GET", data=None):
             print(f"Graph API Error: {e.code} - {error_body}", file=sys.stderr)
 
         return None
+
+
+def global_parent_parser():
+    """Return a fresh parent parser carrying flags every leaf command should expose.
+
+    Subparsers don't propagate parents to their sub-subparsers, so each leaf
+    `add_parser(...)` call needs `parents=[global_parent_parser()]` rather than
+    relying on inheritance.
+
+    Currently exposes:
+      --json   Emit structured JSON instead of formatted text.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument(
+        '--json', dest='json_mode', action='store_true',
+        help='Emit structured JSON to stdout instead of formatted text',
+    )
+    return p
+
+
+def is_json_mode(args):
+    """True if --json was supplied at any parser level."""
+    return bool(getattr(args, 'json_mode', False))
+
+
+def emit_json(data):
+    """Serialize data as JSON to stdout (UTF-8, no ASCII escaping, str() fallback)."""
+    print(json.dumps(data, ensure_ascii=False, default=str, indent=2))
 
 
 def make_oauth_request(endpoint, data):

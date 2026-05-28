@@ -15,7 +15,10 @@ from email.utils import getaddresses
 from pathlib import Path
 from datetime import datetime
 
-from .common import get_access_token, make_graph_request, GRAPH_API_BASE
+from .common import (
+    get_access_token, make_graph_request, GRAPH_API_BASE,
+    global_parent_parser, is_json_mode, emit_json,
+)
 from .calendar import parse_since_expression
 
 # Mail storage location
@@ -597,18 +600,61 @@ def send_email_structured(access_token, to_addresses, subject, body,
 # CLI COMMAND FUNCTIONS
 # ============================================================================
 
+def _serialize_message_summary(msg):
+    """Lightweight dict for `mail read` list views."""
+    from_field = (msg.get('from') or {}).get('emailAddress') or {}
+    return {
+        'id': msg.get('id'),
+        'subject': msg.get('subject'),
+        'from': {'name': from_field.get('name'), 'address': from_field.get('address')},
+        'received': msg.get('receivedDateTime'),
+        'is_read': msg.get('isRead'),
+        'has_attachments': msg.get('hasAttachments'),
+        'preview': msg.get('bodyPreview'),
+    }
+
+
+def _serialize_message_full(msg):
+    """Full dict for `mail read <ID>` detail view."""
+    out = _serialize_message_summary(msg)
+    body = msg.get('body') or {}
+    out['body'] = {
+        'content_type': body.get('contentType'),
+        'content': body.get('content'),
+    }
+    out['attachments'] = [
+        {
+            'id': a.get('id'),
+            'name': a.get('name'),
+            'content_type': a.get('contentType'),
+            'size': a.get('size'),
+            'is_inline': a.get('isInline'),
+        }
+        for a in (msg.get('attachments') or [])
+    ]
+    return out
+
+
 def cmd_read(args):
     """Handle 'o365 mail read' command using Graph API"""
     access_token = get_access_token()
 
     # If specific message IDs provided, fetch and display those messages
     if args.ids:
+        messages = []
         for msg_id in args.ids:
             url = f"{GRAPH_API_BASE}/me/messages/{msg_id}?$expand=attachments"
             msg = make_graph_request(url, access_token)
             if not msg:
                 print(f"Error: Message not found: {msg_id}", file=sys.stderr)
                 sys.exit(1)
+            messages.append(msg)
+
+        if is_json_mode(args):
+            emit_json({'messages': [_serialize_message_full(m) for m in messages]})
+            return
+
+        for msg in messages:
             display_message(msg, html=args.html)
         return
 
@@ -636,7 +682,17 @@ def cmd_read(args):
     # Get user's domain for external sender detection
     user_domain = get_user_domain(access_token)
 
-    # Stream and display messages as they're fetched
+    # JSON: collect first, emit at end. Text: stream as fetched.
+    if is_json_mode(args):
+        collected = []
+        for page in get_messages_stream(
+            access_token, folder=folder, max_count=max_count,
+            since=since, unread=unread_filter, search=args.search,
+        ):
+            collected.extend(_serialize_message_summary(m) for m in page)
+        emit_json({'messages': collected, 'count': len(collected)})
+        return
+
     total_displayed = 0
     for page in get_messages_stream(
         access_token,
@@ -760,10 +816,9 @@ def cmd_search(args):
     # Get user's domain for external sender detection
     user_domain = get_user_domain(access_token)
 
-    # Stream and display messages as they're fetched
-    total_displayed = 0
+    # Stream messages, optionally local-filtering by --since/--unread/--read.
+    matches = []
     total_filtered = 0
-
     for page in get_messages_stream(
         access_token,
         folder='Inbox',  # Search will search all folders anyway when search param is set
@@ -773,23 +828,31 @@ def cmd_search(args):
         search=query
     ):
         for msg in page:
-            # Apply local filtering for --since if needed
             if since:
                 received = parse_graph_datetime(msg['receivedDateTime'])
                 if received < since:
                     total_filtered += 1
                     continue
-
-            # Apply local filtering for --unread if needed
             if args.unread and msg.get('isRead', True):
                 total_filtered += 1
                 continue
             elif args.read and not msg.get('isRead', False):
                 total_filtered += 1
                 continue
+            matches.append(msg)
 
-            display_message_summary(msg, user_domain)
-            total_displayed += 1
+    if is_json_mode(args):
+        emit_json({
+            'query': query,
+            'messages': [_serialize_message_summary(m) for m in matches],
+            'count': len(matches),
+            'filtered_out': total_filtered,
+        })
+        return
+
+    for msg in matches:
+        display_message_summary(msg, user_domain)
+    total_displayed = len(matches)
 
     if total_displayed == 0:
         if total_filtered > 0:
@@ -1096,10 +1159,13 @@ def _upload_large_attachment(access_token, message_id, att):
 def setup_parser(subparsers):
     """Setup argparse subcommands for mail"""
 
+    _parent = global_parent_parser()
+
     # o365 mail read
     read_parser = subparsers.add_parser(
         'read',
         aliases=['list', 'ls'],
+        parents=[_parent],
         help='List and read emails via Graph API (aliases: list, ls)',
         description='List and read emails via Microsoft Graph API.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1133,6 +1199,7 @@ def setup_parser(subparsers):
     # o365 mail archive
     archive_parser = subparsers.add_parser(
         'archive',
+        parents=[_parent],
         help='Archive emails to Archive folder',
         description='Archive emails to Archive folder using Graph API.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1151,6 +1218,7 @@ def setup_parser(subparsers):
     # o365 mail mark-read
     mark_read_parser = subparsers.add_parser(
         'mark-read',
+        parents=[_parent],
         help='Mark emails as read',
         description='Mark emails as read using Graph API.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1169,6 +1237,7 @@ def setup_parser(subparsers):
     # o365 mail send
     send_parser = subparsers.add_parser(
         'send',
+        parents=[_parent],
         help='Send email via Microsoft Graph',
         description='Send email via Microsoft Graph (/me/sendMail). '
                    'Sends as the authenticated user; no SMTP credentials needed. '
@@ -1223,6 +1292,7 @@ Recipients:
     # o365 mail search
     search_parser = subparsers.add_parser(
         'search',
+        parents=[_parent],
         help='Search emails across all folders',
         description='Search emails using Microsoft Graph full-text search. '
                    'This searches across subject, body, sender, and recipients. '
@@ -1258,6 +1328,7 @@ Notes:
     # o365 mail download-attachment
     download_attachment_parser = subparsers.add_parser(
         'download-attachment',
+        parents=[_parent],
         help='Download an email attachment',
         description='Download an attachment from an email using Graph API.',
         formatter_class=argparse.RawDescriptionHelpFormatter,

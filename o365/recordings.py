@@ -10,7 +10,7 @@ import urllib.parse
 from pathlib import Path
 from datetime import datetime
 
-from .common import get_access_token, make_graph_request, GRAPH_API_BASE
+from .common import get_access_token, make_graph_request, GRAPH_API_BASE, global_parent_parser, is_json_mode, emit_json
 from .calendar import parse_since_expression
 
 
@@ -535,6 +535,13 @@ def cmd_list(args):
     # List recordings
     recordings = list_recordings(access_token, since, before, args.organizer, args.count or 50)
 
+    if is_json_mode(args):
+        emit_json({
+            'recordings': [_serialize_recording(r) for r in recordings],
+            'count': len(recordings),
+        })
+        return
+
     if not recordings:
         print("No recordings found")
         return
@@ -572,6 +579,14 @@ def cmd_search(args):
 
     # Search recordings
     recordings = search_recordings(access_token, args.query, since, args.organizer, args.count or 50)
+
+    if is_json_mode(args):
+        emit_json({
+            'query': args.query,
+            'recordings': [_serialize_recording(r) for r in recordings],
+            'count': len(recordings),
+        })
+        return
 
     if not recordings:
         print(f"No recordings found matching '{args.query}'")
@@ -648,6 +663,21 @@ def cmd_transcript(args):
         print(output)
 
 
+def _serialize_recording(item):
+    """Compact dict for `recordings list`/`search`/`info` --json output."""
+    creator = ((item.get('createdBy') or {}).get('user') or {})
+    return {
+        'id': item.get('id'),
+        'name': item.get('name'),
+        'size': item.get('size'),
+        'created': item.get('createdDateTime'),
+        'last_modified': item.get('lastModifiedDateTime'),
+        'created_by': creator.get('displayName'),
+        'web_url': item.get('webUrl'),
+        'mime_type': (item.get('file') or {}).get('mimeType'),
+    }
+
+
 def cmd_info(args):
     """Handle 'o365 recordings info' command"""
     access_token = get_access_token()
@@ -659,6 +689,12 @@ def cmd_info(args):
     if not item:
         print("Recording not found", file=sys.stderr)
         sys.exit(1)
+
+    if is_json_mode(args):
+        entry = _serialize_recording(item)
+        entry['has_transcript'] = bool(get_transcript(access_token, args.recording_id))
+        emit_json(entry)
+        return
 
     print(f"\n📹 Recording Details:\n")
     print(f"Name:          {item.get('name', 'Unknown')}")
@@ -685,9 +721,12 @@ def cmd_info(args):
 def setup_parser(subparsers):
     """Setup argparse subcommands for recordings"""
 
+    _parent = global_parent_parser()
+
     # o365 recordings list
     list_parser = subparsers.add_parser(
         'list',
+        parents=[_parent],
         aliases=['ls'],
         help='List meeting recordings (alias: ls)',
         description='List Microsoft Teams meeting recordings.'
@@ -707,6 +746,7 @@ def setup_parser(subparsers):
     # o365 recordings search
     search_parser = subparsers.add_parser(
         'search',
+        parents=[_parent],
         help='Search meeting recordings',
         description='Search for meeting recordings by name or keywords.'
     )
@@ -724,6 +764,7 @@ def setup_parser(subparsers):
     # o365 recordings download
     download_parser = subparsers.add_parser(
         'download',
+        parents=[_parent],
         help='Download a meeting recording',
         description='Download a Microsoft Teams meeting recording.'
     )
@@ -738,6 +779,7 @@ def setup_parser(subparsers):
     # o365 recordings transcript
     transcript_parser = subparsers.add_parser(
         'transcript',
+        parents=[_parent],
         help='Get meeting transcript',
         description='Get or download meeting transcript.'
     )
@@ -757,6 +799,7 @@ def setup_parser(subparsers):
     # o365 recordings info
     info_parser = subparsers.add_parser(
         'info',
+        parents=[_parent],
         help='Show recording details',
         description='Show detailed information about a recording.'
     )

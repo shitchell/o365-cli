@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.error
 from pathlib import Path
 
-from .common import get_access_token, make_graph_request, GRAPH_API_BASE
+from .common import get_access_token, make_graph_request, GRAPH_API_BASE, global_parent_parser, is_json_mode, emit_json
 from .calendar import parse_since_expression
 
 
@@ -672,11 +672,47 @@ def upload_file_structured(access_token, source_path, dest_path, drive_id=None, 
 
 # Command handlers
 
+def _serialize_drive(drive):
+    """Compact dict for `files drives` --json output."""
+    owner = (((drive.get('owner') or {}).get('user') or {}).get('displayName')) or None
+    return {
+        'id': drive.get('id'),
+        'name': drive.get('name'),
+        'drive_type': drive.get('driveType'),
+        'owner': owner,
+        'web_url': drive.get('webUrl'),
+    }
+
+
+def _serialize_file_item(item):
+    """Compact dict for `files list`/`files search` --json output."""
+    parent_ref = item.get('parentReference') or {}
+    parent_path = (parent_ref.get('path') or '').replace('/drive/root:', '') or '/'
+    return {
+        'id': item.get('id'),
+        'name': item.get('name'),
+        'type': 'folder' if 'folder' in item else 'file',
+        'size': item.get('size'),
+        'last_modified': item.get('lastModifiedDateTime'),
+        'created': item.get('createdDateTime'),
+        'path': parent_path,
+        'web_url': item.get('webUrl'),
+        'mime_type': (item.get('file') or {}).get('mimeType'),
+    }
+
+
 def cmd_drives(args):
     """Handle 'o365 files drives' command"""
     access_token = get_access_token()
 
     drives = get_drives(access_token)
+
+    if is_json_mode(args):
+        emit_json({
+            'drives': [_serialize_drive(d) for d in drives],
+            'count': len(drives),
+        })
+        return
 
     if not drives:
         print("No drives found")
@@ -734,6 +770,15 @@ def cmd_list(args):
     path = args.path or '/'
     items = list_files(access_token, path, drive_id, args.recursive, since)
 
+    if is_json_mode(args):
+        emit_json({
+            'path': path,
+            'drive_id': drive_id,
+            'items': [_serialize_file_item(i) for i in items],
+            'count': len(items),
+        })
+        return
+
     if not items:
         print(f"No files found in {path}")
         return
@@ -784,6 +829,14 @@ def cmd_search(args):
 
     # Search files
     items = search_files(access_token, args.query, drive_id, args.type, since, args.count or 50)
+
+    if is_json_mode(args):
+        emit_json({
+            'query': args.query,
+            'items': [_serialize_file_item(i) for i in items],
+            'count': len(items),
+        })
+        return
 
     if not items:
         print(f"No files found matching '{args.query}'")
@@ -922,9 +975,12 @@ def format_size(bytes_size):
 def setup_parser(subparsers):
     """Setup argparse subcommands for files"""
 
+    _parent = global_parent_parser()
+
     # o365 files drives
     drives_parser = subparsers.add_parser(
         'drives',
+        parents=[_parent],
         help='List available drives',
         description='List all available drives (personal OneDrive and shared SharePoint sites).'
     )
@@ -937,6 +993,7 @@ def setup_parser(subparsers):
     # o365 files list
     list_parser = subparsers.add_parser(
         'list',
+        parents=[_parent],
         aliases=['ls'],
         help='List files and folders (alias: ls)',
         description='List files and folders in OneDrive or SharePoint.'
@@ -958,6 +1015,7 @@ def setup_parser(subparsers):
     # o365 files search
     search_parser = subparsers.add_parser(
         'search',
+        parents=[_parent],
         help='Search for files',
         description='Search for files across OneDrive and SharePoint.'
     )
@@ -977,6 +1035,7 @@ def setup_parser(subparsers):
     # o365 files download
     download_parser = subparsers.add_parser(
         'download',
+        parents=[_parent],
         help='Download files or folders',
         description='Download files or folders from OneDrive/SharePoint.'
     )
@@ -995,6 +1054,7 @@ def setup_parser(subparsers):
     # o365 files upload
     upload_parser = subparsers.add_parser(
         'upload',
+        parents=[_parent],
         help='Upload files to OneDrive/SharePoint',
         description='Upload files to OneDrive or SharePoint.'
     )

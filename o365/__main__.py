@@ -12,10 +12,14 @@ import argparse
 def main():
     """Main entry point for o365 command"""
 
+    from .common import global_parent_parser
+    global_parent = global_parent_parser()
+
     parser = argparse.ArgumentParser(
         prog='o365',
         description='Office365 command-line interface for managing email, calendar, and contacts.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[global_parent],
         epilog="""
 Examples:
   o365 mail read --unread             # Read unread emails

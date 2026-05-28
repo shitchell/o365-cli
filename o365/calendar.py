@@ -9,7 +9,7 @@ import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
-from .common import get_access_token, make_graph_request, GRAPH_API_BASE
+from .common import get_access_token, make_graph_request, GRAPH_API_BASE, global_parent_parser, is_json_mode, emit_json
 from .contacts import search_users
 
 # Get local timezone
@@ -621,10 +621,49 @@ def cmd_list(args):
     # Fetch and display events
     events = list_events(access_token, start_date, end_date, user_email)
 
-    # TODO: Apply additional filters here (title regex, attendees, etc.)
-    # filtered_events = apply_filters(events, args)
+    if is_json_mode(args):
+        emit_json({
+            'user': user_email,
+            'range': {'start': start_date.isoformat(), 'end': end_date.isoformat()},
+            'events': [_serialize_event(e) for e in events],
+            'count': len(events),
+        })
+        return
 
     display_events(events, start_date, end_date, user_email)
+
+
+def _serialize_event(event):
+    """Compact dict for `calendar list` --json output."""
+    start = (event.get('start') or {})
+    end = (event.get('end') or {})
+    location = (event.get('location') or {}).get('displayName')
+    organizer = ((event.get('organizer') or {}).get('emailAddress') or {})
+    attendees = [
+        {
+            'name': ((a.get('emailAddress') or {}).get('name')),
+            'address': ((a.get('emailAddress') or {}).get('address')),
+            'response': (a.get('status') or {}).get('response'),
+            'type': a.get('type'),
+        }
+        for a in (event.get('attendees') or [])
+    ]
+    return {
+        'id': event.get('id'),
+        'subject': event.get('subject'),
+        'start': start.get('dateTime'),
+        'start_tz': start.get('timeZone'),
+        'end': end.get('dateTime'),
+        'end_tz': end.get('timeZone'),
+        'is_all_day': event.get('isAllDay'),
+        'is_cancelled': event.get('isCancelled'),
+        'location': location,
+        'organizer_name': organizer.get('name'),
+        'organizer_address': organizer.get('address'),
+        'attendees': attendees,
+        'online_meeting_url': (event.get('onlineMeeting') or {}).get('joinUrl'),
+        'web_link': event.get('webLink'),
+    }
 
 
 def cmd_create(args):
@@ -722,9 +761,12 @@ def cmd_delete(args):
 def setup_parser(subparsers):
     """Setup argparse subcommands for calendar"""
 
+    _parent = global_parent_parser()
+
     # o365 calendar list
     list_parser = subparsers.add_parser(
         'list',
+        parents=[_parent],
         aliases=['list-events', 'events', 'ls'],
         help='List calendar events (aliases: list-events, events, ls)',
         description='List calendar events from Office365 with flexible filtering.',
@@ -779,6 +821,7 @@ Examples:
     # o365 calendar create
     create_parser = subparsers.add_parser(
         'create',
+        parents=[_parent],
         help='Create a calendar event',
         description='Create a new calendar event in Office365.',
         epilog="""
@@ -839,6 +882,7 @@ Examples:
     # o365 calendar delete
     delete_parser = subparsers.add_parser(
         'delete',
+        parents=[_parent],
         help='Delete a calendar event',
         description='Delete one or more calendar events by ID.',
         epilog="""
