@@ -21,17 +21,28 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[global_parent],
         epilog="""
-Examples:
-  o365 mail read --unread             # Read unread emails
-  o365 calendar list --today          # Show today's calendar
-  o365 chat list --with john          # List chats with john
-  o365 files list /Documents          # List files in Documents
-  o365 recordings list --since "1 week ago"  # List recent recordings
-  o365 contacts search john           # Search for a contact
-  o365 config set auth.client_id "your-id"   # Set config value
-  o365 auth status                    # Check authentication status
+Common workflows:
+  o365 mail read --unread                   # Inbox unread emails
+  o365 mail read -f "Sent Items" -n 10      # Folder by display name
+  o365 mail search "HSP-1234"               # Full-text search all folders
+  o365 mail send -r a@b.com -S "hi" -H -    # Send (-H - = HTML from stdin)
+  o365 calendar list --today                # Today's events
+  o365 chat list                            # All recent chats
+  o365 chat read --chat <id>                # Read by ID (--chat or positional)
+  o365 chat send --to "Luke Hands" -m "hi"  # 1:1 by display name
+  o365 chat send --to "Luke" -f file.pdf    # With attachment (any size)
+  o365 files search "budget" --type xlsx    # Search by name + extension
+  o365 contacts search luke                 # Find email by name
+  o365 auth status                          # Check token + scopes
 
-For more help on a specific command:
+Scripting tips:
+  o365 --json mail read --unread            # Structured JSON output
+  o365 mail read --unread --json            # Same flag, either position
+  o365 contacts search luke --resolve       # Returns just the email
+  Long-running scripts: re-call get_access_token() periodically (it
+  auto-refreshes within 5 min of expiry; don't cache the string).
+
+For more help:
   o365 <command> --help
   o365 <command> <subcommand> --help
 """
