@@ -233,35 +233,51 @@ def save_tokens(tokens):
     TOKEN_FILE.chmod(0o600)
 
 
-def get_access_token():
-    """Get the current access token, automatically refreshing if expired"""
+def get_access_token(refresh_if_expires_within=300, force_refresh=False):
+    """Return a valid access token, refreshing transparently when needed.
+
+    The Graph access token is valid for ~1 hour. The CLI itself calls this
+    once per invocation, so most users never see token expiry. Long-running
+    callers that hold a token value (rather than re-calling this) will hit
+    401 InvalidAuthenticationToken after the token expires — for those,
+    re-call get_access_token() periodically (cheap when the token is still
+    fresh) instead of caching the string.
+
+    Args:
+        refresh_if_expires_within: Refresh if the token expires within this
+            many seconds. Default 300 (5 min) matches the CLI's existing
+            behavior. Pass a larger value (e.g. 1800) from long-running
+            scripts to refresh proactively.
+        force_refresh: If True, refresh unconditionally even if the current
+            token is still valid. Useful after a 401 to confirm the cause
+            isn't a stale local token.
+
+    Returns:
+        str: A valid Graph access token.
+    """
     tokens = load_tokens()
 
-    # Check if token is expired or close to expiring (within 5 minutes)
-    if '_saved_at' in tokens and 'expires_in' in tokens:
+    needs_refresh = force_refresh
+    if not needs_refresh and '_saved_at' in tokens and 'expires_in' in tokens:
         from time import time
-        saved_at = tokens['_saved_at']
-        expires_in = tokens['expires_in']
-        time_elapsed = time() - saved_at
-        time_remaining = expires_in - time_elapsed
+        time_remaining = tokens['expires_in'] - (time() - tokens['_saved_at'])
+        if time_remaining < refresh_if_expires_within:
+            needs_refresh = True
 
-        # If token expires in less than 5 minutes, refresh it
-        if time_remaining < 300:  # 5 minutes buffer
-            if tokens.get('refresh_token'):
-                try:
-                    # Attempt to refresh
-                    new_tokens = make_oauth_request('/token', {
-                        'client_id': CLIENT_ID,
-                        'grant_type': 'refresh_token',
-                        'refresh_token': tokens['refresh_token'],
-                        'scope': ' '.join(SCOPES)
-                    })
-                    save_tokens(new_tokens)
-                    tokens = new_tokens
-                except Exception:
-                    # If refresh fails, continue with existing token
-                    # (it might still work, or command will fail with proper error)
-                    pass
+    if needs_refresh and tokens.get('refresh_token'):
+        try:
+            new_tokens = make_oauth_request('/token', {
+                'client_id': CLIENT_ID,
+                'grant_type': 'refresh_token',
+                'refresh_token': tokens['refresh_token'],
+                'scope': ' '.join(SCOPES)
+            })
+            save_tokens(new_tokens)
+            tokens = new_tokens
+        except Exception:
+            # Continue with existing token — it may still work, and if not
+            # the caller will see the Graph error directly.
+            pass
 
     access_token = tokens.get('access_token')
 
