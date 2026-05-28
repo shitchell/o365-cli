@@ -9,6 +9,7 @@ import os
 import json
 import urllib.request
 import urllib.parse
+import urllib.error
 from pathlib import Path
 
 from .common import get_access_token, make_graph_request, GRAPH_API_BASE
@@ -328,9 +329,83 @@ def upload_file(access_token, source_path, dest_path, drive_id=None, overwrite=F
             print(f"Error uploading file: {e}", file=sys.stderr)
             return None
     else:
-        # For large files (>=4MB), use upload session
-        print("Note: Large file uploads (>=4MB) use resumable upload sessions", file=sys.stderr)
-        print("This feature is not yet implemented. File must be <4MB.", file=sys.stderr)
+        # For large files (>=4MB), use a resumable upload session.
+        return _upload_large_file(
+            access_token, source, dest_path, drive_id, overwrite, file_size
+        )
+
+
+def _upload_large_file(access_token, source, dest_path, drive_id, overwrite, file_size):
+    """Upload a file via a resumable upload session.
+
+    Required by Graph for files >=4MB. Streams the file in 10 MiB chunks
+    (a multiple of the 320 KiB chunk-size requirement) so we don't hold the
+    whole file in memory, and emits a per-chunk progress line to stderr.
+    """
+    dest_path = dest_path.strip('/')
+    filename = urllib.parse.quote(source.name, safe='')
+
+    if dest_path:
+        encoded_dest = urllib.parse.quote(dest_path, safe='/')
+        session_path = f"/drives/{drive_id}/root:/{encoded_dest}/{filename}:/createUploadSession"
+    else:
+        session_path = f"/drives/{drive_id}/root:/{filename}:/createUploadSession"
+
+    conflict = 'replace' if overwrite else 'fail'
+    session = make_graph_request(
+        session_path, access_token, method='POST',
+        data={'item': {'@microsoft.graph.conflictBehavior': conflict}},
+    )
+    if not session or 'uploadUrl' not in session:
+        print("Error: Failed to create upload session", file=sys.stderr)
+        return None
+    upload_url = session['uploadUrl']
+
+    # Chunk size must be a multiple of 320 KiB. 10 MiB is a good default —
+    # large enough to be efficient, small enough to keep memory + per-chunk
+    # latency reasonable.
+    CHUNK_SIZE = 10 * 1024 * 1024
+
+    body = b''
+    try:
+        with open(source, 'rb') as f:
+            offset = 0
+            while offset < file_size:
+                chunk = f.read(CHUNK_SIZE)
+                end = offset + len(chunk) - 1
+                req = urllib.request.Request(
+                    upload_url, data=chunk,
+                    headers={
+                        'Content-Length': str(len(chunk)),
+                        'Content-Range': f'bytes {offset}-{end}/{file_size}',
+                    },
+                    method='PUT',
+                )
+                try:
+                    with urllib.request.urlopen(req) as response:
+                        body = response.read()
+                except urllib.error.HTTPError as e:
+                    err = e.read().decode(errors='replace')[:500]
+                    print(f"Error: HTTP {e.code} during chunk upload: {err}", file=sys.stderr)
+                    return None
+
+                pct = (end + 1) * 100.0 / file_size
+                print(
+                    f"  {format_size(end + 1)}/{format_size(file_size)} ({pct:.1f}%)",
+                    file=sys.stderr,
+                )
+                offset += len(chunk)
+    except Exception as e:
+        print(f"Error during chunked upload: {e}", file=sys.stderr)
+        return None
+
+    # Final chunk's response is 200/201 with the created DriveItem JSON.
+    if not body:
+        return None
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as e:
+        print(f"Error parsing upload response: {e}", file=sys.stderr)
         return None
 
 
