@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased — branch `ergonomics-2026-05-28`
+## 1.1.0 — 2026-10-28
 
 A round of CLI ergonomics work aimed at making the tool intuitive for new
-agents and scripts without workarounds. All changes are additive; existing
-flag/subcommand spellings continue to work.
+agents and scripts without workarounds. Existing flag/subcommand spellings
+continue to work. One default changed: `chat send -m` text is now rendered
+as markdown (pass `--plain` for the old behaviour).
 
 ### Added
 
