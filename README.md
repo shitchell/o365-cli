@@ -160,10 +160,23 @@ o365 chat read --chat <chat-id>
 o365 chat read --with john            # Read chat with john
 o365 chat read --with "Project Team"   # Read group chat
 
-# Send messages
+# Send messages (markdown by default, rendered as Teams rich text)
 o365 chat send --to john -m "Quick question"
-o365 chat send --chat <chat-id> -m "Message here"
+o365 chat send --chat <chat-id> -m "**Done.** Notes:
+- one
+- two"
+o365 chat send --chat <chat-id> -m - < notes.md   # long message from stdin/file
+o365 chat send --chat <chat-id> -m "see attached" -f report.pdf
+o365 chat send --chat <chat-id> --plain -m "*literal* text"   # no markdown
+o365 chat send --chat <chat-id> --html -m "<p><b>raw</b> HTML</p>"
+```
 
+Chat messages are markdown: headings, bold/italic, bullet and numbered
+lists, tables, links, inline code and fenced code blocks all render in
+Teams. Single line breaks are kept, so plain text arrives as written. Raw
+HTML inside markdown is escaped; use `--html` to send HTML directly.
+
+```bash
 # Search messages
 o365 chat search "deployment"
 o365 chat search "bug fix" --with john   # Search in john's chats

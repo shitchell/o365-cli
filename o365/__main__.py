@@ -31,6 +31,7 @@ Common workflows:
   o365 chat read --chat <id>                # Read by ID (--chat or positional)
   o365 chat send --to "Luke Hands" -m "hi"  # 1:1 by display name
   o365 chat send --to "Luke" -f file.pdf    # With attachment (any size)
+  o365 chat send --chat <id> -m - < msg.md  # Markdown from stdin (rich text)
   o365 files search "budget" --type xlsx    # Search by name + extension
   o365 contacts search luke                 # Find email by name
   o365 auth status                          # Check token + scopes

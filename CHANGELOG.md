@@ -8,6 +8,14 @@ flag/subcommand spellings continue to work.
 
 ### Added
 
+- **Rich text in `chat send`.** `-m` is now markdown, rendered to the HTML
+  subset Teams displays (headings, bold/italic, bullet + numbered lists,
+  tables, links, code blocks; `<pre>` becomes a native Teams code block).
+  Single newlines are kept as line breaks, so plain text still arrives as
+  written. `-m -` reads the message from stdin (no shell quoting for long
+  messages). `--plain` sends the old contentType=text body; `--html` sends
+  HTML as-is. Works together with `-f` attachments. New dependency:
+  `markdown-it-py`.
 - **`chat search --context N`** — shows N messages immediately preceding
   each hit, for thread context. One extra Graph call per hit.
 - **`chat.all` scope toggle + KQL-powered chat search.** Adds

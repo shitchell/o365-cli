@@ -279,15 +279,68 @@ def get_chat_messages(access_token, chat_id, count=50, since=None, fetch_all=Fal
     return list(reversed(messages))
 
 
-def send_message(access_token, chat_id, content, attachments=None):
+# Message formats accepted by `chat send`. Markdown is the default because it
+# reads fine as plain text too: a message with no markdown syntax still comes
+# out as paragraphs with its line breaks intact.
+MESSAGE_FORMATS = ('markdown', 'html', 'plain')
+
+
+def plain_to_html(text):
+    """Escape plain text for an HTML body, keeping its line breaks."""
+    return html.escape(text or '').replace('\n', '<br>')
+
+
+def markdown_to_html(text):
+    """Render markdown to the HTML subset Teams chat displays.
+
+    CommonMark plus tables and ~~strikethrough~~. Single newlines become <br>
+    (chat messages are written line by line, not reflowed prose), and raw HTML
+    in the source is escaped rather than passed through; use --html for that.
+    """
+    from markdown_it import MarkdownIt
+
+    md = MarkdownIt('commonmark', {'breaks': True, 'html': False})
+    md.enable(['table', 'strikethrough'])
+    rendered = md.render(text or '')
+    # markdown-it puts a newline after every block tag. Teams can show those
+    # as extra blank lines, so drop the ones between tags, but leave the
+    # newlines inside <pre> blocks alone since they are the code's lines.
+    parts = re.split(r'(<pre>.*?</pre>)', rendered, flags=re.DOTALL)
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r'(^|>)\s*\n\s*', r'\1', parts[i])
+    for i in range(1, len(parts), 2):
+        parts[i] = parts[i].replace('\n</code></pre>', '</code></pre>')
+    return ''.join(parts).strip()
+
+
+def render_message(text, fmt='markdown'):
+    """Turn message text into a Graph chatMessage body.
+
+    Args:
+        text: Message text as the user wrote it
+        fmt: One of MESSAGE_FORMATS
+
+    Returns:
+        (content_type, content) tuple for the Graph 'body' object
+    """
+    if fmt == 'html':
+        return 'html', text or ''
+    if fmt == 'plain':
+        return 'text', text or ''
+    return 'html', markdown_to_html(text)
+
+
+def send_message(access_token, chat_id, content, attachments=None,
+                 content_type='text'):
     """Send a message to a chat
 
     Args:
         access_token: OAuth2 access token
         chat_id: Chat ID to send to
-        content: Message content (plain text, or HTML if attachments are present)
+        content: Message content, interpreted per content_type
         attachments: Optional list of attachment dicts, each with keys:
             'id' (GUID), 'name' (filename), 'web_url' (OneDrive webUrl).
+        content_type: 'text' (plain) or 'html'. See render_message().
 
     Returns:
         Created message object or None on error
@@ -297,15 +350,14 @@ def send_message(access_token, chat_id, content, attachments=None):
     if attachments:
         # Teams requires HTML body referencing each attachment by its GUID,
         # plus a parallel attachments array with contentType=reference.
-        import html as _html
-        body_text = _html.escape(content or '').replace('\n', '<br>')
+        body_html = content if content_type == 'html' else plain_to_html(content)
         attach_html = ''.join(
             f'<attachment id="{a["id"]}"></attachment>' for a in attachments
         )
         message = {
             'body': {
                 'contentType': 'html',
-                'content': f'{body_text}{attach_html}',
+                'content': f'{body_html or ""}{attach_html}',
             },
             'attachments': [
                 {
@@ -320,7 +372,7 @@ def send_message(access_token, chat_id, content, attachments=None):
     else:
         message = {
             'body': {
-                'contentType': 'text',
+                'contentType': content_type,
                 'content': content,
             }
         }
@@ -970,6 +1022,13 @@ def cmd_read(args):
         print()
 
 
+def _read_message_arg(value):
+    """Resolve -m: '-' reads the message from stdin, else it is literal text."""
+    if value == '-':
+        return sys.stdin.read()
+    return value
+
+
 def cmd_send(args):
     """Handle 'o365 chat send' command"""
     import uuid
@@ -979,9 +1038,12 @@ def cmd_send(args):
     access_token = get_access_token()
 
     files = args.files or []
-    if not args.message and not files:
+    message = _read_message_arg(args.message)
+    if not message and not files:
         print("Error: Must specify -m/--message and/or -f/--file", file=sys.stderr)
         sys.exit(1)
+    fmt = getattr(args, 'format', None) or 'markdown'
+    content_type, content = render_message(message, fmt) if message else ('text', '')
 
     # Resolve chat ID
     if args.chat_id:
@@ -1057,7 +1119,8 @@ def cmd_send(args):
         })
 
     # Send message (with attachments if any)
-    result = send_message(access_token, chat_id, args.message or '', attachments=attachments)
+    result = send_message(access_token, chat_id, content,
+                          attachments=attachments, content_type=content_type)
 
     if result:
         if attachments:
@@ -1311,19 +1374,38 @@ def setup_parser(subparsers):
         'send',
         parents=[_parent],
         help='Send a message to a chat',
-        description='Send a message to a Microsoft Teams chat.'
+        description='Send a message to a Microsoft Teams chat.\n\n'
+                    'The message is markdown, sent as rich text (bold, lists,\n'
+                    'headings, tables, code blocks). Line breaks are kept as\n'
+                    'written, so plain text comes through unchanged.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  o365 chat send --to "Luke Hands" -m "**done**, see below"
+  o365 chat send --chat <id> -m - < notes.md      # markdown from stdin
+  cat <<'EOF' | o365 chat send --chat <id> -m -   # no shell quoting needed
+  o365 chat send --chat <id> -m "see attached" -f report.pdf
+"""
     )
 
     send_parser.add_argument('--chat', dest='chat_id', type=str, metavar='CHAT_ID',
                             help='Chat ID to send to')
     send_parser.add_argument('--to', type=str, metavar='USER',
                             help='Send to chat with specific user or group chat name')
-    send_parser.add_argument('-m', '--message', type=str,
-                            help='Message content to send (optional if -f is given)')
+    send_parser.add_argument('-m', '--message', type=str, metavar='TEXT',
+                            help="Message in markdown, or '-' to read it from "
+                                 "stdin (optional if -f is given)")
     send_parser.add_argument('-f', '--file', dest='files', action='append',
                             metavar='PATH',
                             help='Attach a local file (repeatable). '
                                  'Uploaded to "Microsoft Teams Chat Files/" in your OneDrive.')
+    fmt_group = send_parser.add_argument_group(
+        'format overrides (default: render markdown)')
+    fmt_group = fmt_group.add_mutually_exclusive_group()
+    fmt_group.add_argument('--plain', dest='format', action='store_const',
+                           const='plain', help='Send the text as-is, no markdown')
+    fmt_group.add_argument('--html', dest='format', action='store_const',
+                           const='html', help='Message is already Teams HTML')
+    send_parser.set_defaults(format='markdown')
 
     send_parser.set_defaults(func=cmd_send)
 
