@@ -96,12 +96,18 @@ o365 calendar list --today
 ### Mail Commands
 
 ```bash
-# List emails (streams all results by default)
+# List emails (streams all results by default; `mail list` and `mail ls` are aliases)
 o365 mail read
 o365 mail read --unread                      # Only unread emails
 o365 mail read --since "2 days ago"          # Emails from last 2 days
 o365 mail read -n 20                         # Limit to 20 most recent
 o365 mail read -s "payment"                  # Search for "payment"
+
+# Read by folder. Display names work (e.g. "Sent Items") — they're resolved
+# to Graph well-known slugs (sentitems/drafts/deleteditems/junkemail/...) or
+# looked up by displayName for custom folders.
+o365 mail read -f "Sent Items" -n 10
+o365 mail read -f Drafts -n 5
 
 # Read specific email by ID (full Graph API message ID)
 o365 mail read AAMkADFhY2VlZWU4LWMxMTItNGRiYy04ZjlkLTc3...
@@ -118,8 +124,11 @@ o365 mail mark-read --dry-run AAMkADFhY2VlZWU4...  # Preview first
 o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID>
 o365 mail download-attachment <MESSAGE_ID> <ATTACHMENT_ID> -o ~/Downloads/
 
-# Send email
+# Send email via Microsoft Graph (no SMTP credentials needed; sends as the
+# authenticated user). Attachments inline up to ~3MB; larger files auto-route
+# through a draft + resumable upload session before send.
 echo "<p>Hello!</p>" | o365 mail send -r recipient@example.com -S "Subject" -H -
+o365 mail send -r a@b.com -c team@b.com -S "Report" -H - -A report.pdf < msg.html
 ```
 
 **Note**: Message IDs are displayed in full when listing emails. Copy the full ID from the `ID:` line to use with read, archive, or mark-read commands. The `[external]` prefix indicates emails from senders outside your organization.
@@ -145,15 +154,29 @@ o365 chat list
 o365 chat list --with john            # Filter to chats with john
 o365 chat list --since "2 days ago"    # Recent chats
 
-# Read messages
+# Read messages (positional and --chat are equivalent — mirrors `chat send`)
 o365 chat read <chat-id>
+o365 chat read --chat <chat-id>
 o365 chat read --with john            # Read chat with john
 o365 chat read --with "Project Team"   # Read group chat
 
-# Send messages
+# Send messages (markdown by default, rendered as Teams rich text)
 o365 chat send --to john -m "Quick question"
-o365 chat send --chat <chat-id> -m "Message here"
+o365 chat send --chat <chat-id> -m "**Done.** Notes:
+- one
+- two"
+o365 chat send --chat <chat-id> -m - < notes.md   # long message from stdin/file
+o365 chat send --chat <chat-id> -m "see attached" -f report.pdf
+o365 chat send --chat <chat-id> --plain -m "*literal* text"   # no markdown
+o365 chat send --chat <chat-id> --html -m "<p><b>raw</b> HTML</p>"
+```
 
+Chat messages are markdown: headings, bold/italic, bullet and numbered
+lists, tables, links, inline code and fenced code blocks all render in
+Teams. Single line breaks are kept, so plain text arrives as written. Raw
+HTML inside markdown is escaped; use `--html` to send HTML directly.
+
+```bash
 # Search messages
 o365 chat search "deployment"
 o365 chat search "bug fix" --with john   # Search in john's chats
@@ -374,13 +397,40 @@ files = false
 
 ### Additional Configuration (Mail Sending)
 
-For `o365 mail send`, you also need SMTP configuration in `~/.env`:
+`o365 mail send` no longer needs SMTP credentials — it sends via Microsoft
+Graph using the same OAuth token as the rest of the CLI. Just authenticate
+once with `o365 auth login` and `mail send` works.
+
+## Scripting / JSON Output
+
+Every list/read/search/info command accepts `--json` (at any position) to
+emit a structured JSON document on stdout instead of formatted text. This
+makes the CLI easy to consume from scripts or other agents without text
+scraping.
 
 ```bash
-export SMTP_EMAIL=your.email@example.com
-export SMTP_PASSWORD=your-app-password
-export SMTP_SIGNATURE_FILE=~/.signature.html
+o365 --json mail read --unread          # global form
+o365 mail read --unread --json          # leaf form (equivalent)
+o365 chat list --json | jq '.chats[] | select(.type == "group")'
+o365 contacts search "luke" --json
+o365 auth status --json                  # returns token/scope info
 ```
+
+JSON coverage: `mail read`, `mail search`, `chat list`, `chat read`,
+`chat search`, `files drives`, `files list`, `files search`,
+`calendar list`, `contacts list`, `contacts search`, `recordings list`,
+`recordings search`, `recordings info`, `auth status`. Destructive
+commands (`send`, `archive`, `mark-read`, `delete`, file upload/download)
+still print human-readable text only.
+
+### Long-running scripts
+
+`get_access_token()` returns a string valid for ~1 hour. If you cache that
+string in a long-running process you will hit `401 InvalidAuthenticationToken`
+after expiry. Instead, re-call `get_access_token()` periodically — it's
+cheap when the token is still fresh, and auto-refreshes within 5 minutes
+of expiry. Pass `refresh_if_expires_within=1800` for a wider safety margin
+or `force_refresh=True` after a 401.
 
 ## Storage Locations
 

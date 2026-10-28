@@ -12,7 +12,8 @@ from datetime import datetime, timedelta
 
 from .common import (
     CLIENT_ID, TENANT, SCOPES, TOKEN_FILE,
-    make_oauth_request, save_tokens, load_tokens
+    make_oauth_request, save_tokens, load_tokens,
+    global_parent_parser, is_json_mode, emit_json,
 )
 
 
@@ -163,6 +164,27 @@ def cmd_refresh(args):
 
 def cmd_status(args):
     """Handle 'o365 auth status' command"""
+    if is_json_mode(args):
+        if not TOKEN_FILE.exists():
+            emit_json({'authenticated': False, 'token_file': str(TOKEN_FILE)})
+            sys.exit(1)
+        tokens = load_tokens()
+        info = {
+            'authenticated': True,
+            'token_file': str(TOKEN_FILE),
+            'has_access_token': 'access_token' in tokens,
+            'has_refresh_token': 'refresh_token' in tokens,
+            'tenant': TENANT,
+            'client_id': CLIENT_ID,
+            'scopes': SCOPES,
+        }
+        if '_saved_at' in tokens and 'expires_in' in tokens:
+            from time import time
+            remaining = tokens['expires_in'] - (time() - tokens['_saved_at'])
+            info['expires_in_seconds'] = int(remaining)
+            info['expired'] = remaining <= 0
+        emit_json(info)
+        return
     check_status()
 
 
@@ -171,9 +193,12 @@ def cmd_status(args):
 def setup_parser(subparsers):
     """Setup argparse subcommands for auth"""
 
+    _parent = global_parent_parser()
+
     # o365 auth login
     login_parser = subparsers.add_parser(
         'login',
+        parents=[_parent],
         help='Authenticate with Office365 (device code flow)',
         description='Authenticate with Office365 using device code flow. '
                     'The token will be stored locally for future use.'
@@ -183,6 +208,7 @@ def setup_parser(subparsers):
     # o365 auth refresh
     refresh_parser = subparsers.add_parser(
         'refresh',
+        parents=[_parent],
         help='Refresh OAuth2 access token',
         description='Refresh OAuth2 access token using stored refresh token. '
                     'Useful for non-interactive scenarios (e.g., cron jobs).'
@@ -192,6 +218,7 @@ def setup_parser(subparsers):
     # o365 auth status
     status_parser = subparsers.add_parser(
         'status',
+        parents=[_parent],
         help='Show authentication status',
         description='Show authentication status and token information.'
     )

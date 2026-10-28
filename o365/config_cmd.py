@@ -7,7 +7,7 @@ Manage configuration file settings.
 import sys
 from pathlib import Path
 from configparser import ConfigParser
-from .common import CONFIG_FILE, CONFIG_DIR
+from .common import CONFIG_FILE, CONFIG_DIR, global_parent_parser, is_json_mode, emit_json
 
 
 def ensure_config_exists():
@@ -152,9 +152,12 @@ def cmd_path(args):
 def setup_parser(subparsers):
     """Setup argparse subcommands for config"""
 
+    _parent = global_parent_parser()
+
     # o365 config list
     list_parser = subparsers.add_parser(
         'list',
+        parents=[_parent],
         help='List all configuration values',
         description='Display all configuration values from the config file.'
     )
@@ -163,6 +166,7 @@ def setup_parser(subparsers):
     # o365 config get
     get_parser = subparsers.add_parser(
         'get',
+        parents=[_parent],
         help='Get a configuration value',
         description='Get a specific configuration value.',
         epilog="""
@@ -178,6 +182,7 @@ Examples:
     # o365 config set
     set_parser = subparsers.add_parser(
         'set',
+        parents=[_parent],
         help='Set a configuration value',
         description='Set a configuration value in the config file.',
         epilog="""
@@ -195,6 +200,7 @@ Examples:
     # o365 config unset
     unset_parser = subparsers.add_parser(
         'unset',
+        parents=[_parent],
         help='Remove a configuration value',
         description='Remove a configuration value from the config file.',
         epilog="""
@@ -209,6 +215,7 @@ Examples:
     # o365 config edit
     edit_parser = subparsers.add_parser(
         'edit',
+        parents=[_parent],
         help='Edit configuration file in editor',
         description='Open the configuration file in your default editor ($EDITOR or $VISUAL).'
     )
@@ -217,6 +224,7 @@ Examples:
     # o365 config path
     path_parser = subparsers.add_parser(
         'path',
+        parents=[_parent],
         help='Show configuration file path',
         description='Display the path to the configuration file.'
     )

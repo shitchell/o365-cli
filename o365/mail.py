@@ -5,18 +5,21 @@ Sync, read, archive, mark read, and send emails.
 """
 
 import sys
-import subprocess
 import re
+import base64
+import urllib.error
+import urllib.request
 import html2text
 import argparse
+from email.utils import getaddresses
 from pathlib import Path
 from datetime import datetime
 
-from .common import get_access_token, make_graph_request, GRAPH_API_BASE
+from .common import (
+    get_access_token, make_graph_request, GRAPH_API_BASE,
+    global_parent_parser, is_json_mode, emit_json,
+)
 from .calendar import parse_since_expression
-
-# For now, some commands are implemented by calling existing scripts
-# Later we can refactor these into pure Python if needed
 
 # Mail storage location
 MAILDIR_BASE = Path.home() / ".mail" / "office365"
@@ -54,6 +57,83 @@ def is_external_sender(sender_email, user_domain):
 
     sender_domain = sender_email.split('@')[1].lower()
     return sender_domain != user_domain
+
+
+# Graph well-known mail folder slugs. Keys are normalized display names
+# (lowercased); values are the slugs Graph accepts in URLs.
+_WELL_KNOWN_FOLDERS = {
+    'inbox': 'inbox',
+    'sent items': 'sentitems',
+    'sent': 'sentitems',
+    'sentitems': 'sentitems',
+    'drafts': 'drafts',
+    'deleted items': 'deleteditems',
+    'deleteditems': 'deleteditems',
+    'trash': 'deleteditems',
+    'junk email': 'junkemail',
+    'junkemail': 'junkemail',
+    'junk': 'junkemail',
+    'spam': 'junkemail',
+    'outbox': 'outbox',
+    'archive': 'archive',
+    'conversation history': 'conversationhistory',
+    'conversationhistory': 'conversationhistory',
+    'clutter': 'clutter',
+    'scheduled': 'scheduled',
+    'msgfolderroot': 'msgfolderroot',
+}
+
+_FOLDER_RESOLVE_CACHE = {}
+
+
+def resolve_folder(folder, access_token):
+    """Resolve a user-supplied folder string to something Graph will accept.
+
+    Order of precedence:
+      1. Cached resolution from this process.
+      2. Looks-like-a-Graph-folder-ID (starts with AAMk, long) -> pass through.
+      3. Well-known display name -> Graph slug (Inbox, "Sent Items", etc.).
+      4. Otherwise look up displayName via /me/mailFolders.
+    """
+    if not folder:
+        return 'inbox'
+
+    if folder in _FOLDER_RESOLVE_CACHE:
+        return _FOLDER_RESOLVE_CACHE[folder]
+
+    # Pass through long Graph IDs unchanged
+    if folder.startswith('AAMk') and len(folder) > 60:
+        _FOLDER_RESOLVE_CACHE[folder] = folder
+        return folder
+
+    # Map well-known names
+    slug = _WELL_KNOWN_FOLDERS.get(folder.lower())
+    if slug:
+        _FOLDER_RESOLVE_CACHE[folder] = slug
+        return slug
+
+    # Look up by displayName. OData filter values need URL-encoding because
+    # the URL contains spaces and quotes that the http client won't accept raw.
+    import urllib.parse as _up
+    escaped = folder.replace("'", "''")
+    query = _up.urlencode({
+        '$filter': f"displayName eq '{escaped}'",
+        '$top': '1',
+        '$select': 'id,displayName',
+    })
+    result = make_graph_request(f"/me/mailFolders?{query}", access_token)
+    if result and result.get('value'):
+        folder_id = result['value'][0]['id']
+        _FOLDER_RESOLVE_CACHE[folder] = folder_id
+        return folder_id
+
+    print(
+        f"Error: mail folder {folder!r} not found. "
+        "Use a well-known name (Inbox, \"Sent Items\", Drafts, \"Deleted Items\", "
+        "\"Junk Email\", Outbox, Archive) or the folder's Graph ID.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def parse_graph_datetime(dt_str):
@@ -520,23 +600,66 @@ def send_email_structured(access_token, to_addresses, subject, body,
 # CLI COMMAND FUNCTIONS
 # ============================================================================
 
+def _serialize_message_summary(msg):
+    """Lightweight dict for `mail read` list views."""
+    from_field = (msg.get('from') or {}).get('emailAddress') or {}
+    return {
+        'id': msg.get('id'),
+        'subject': msg.get('subject'),
+        'from': {'name': from_field.get('name'), 'address': from_field.get('address')},
+        'received': msg.get('receivedDateTime'),
+        'is_read': msg.get('isRead'),
+        'has_attachments': msg.get('hasAttachments'),
+        'preview': msg.get('bodyPreview'),
+    }
+
+
+def _serialize_message_full(msg):
+    """Full dict for `mail read <ID>` detail view."""
+    out = _serialize_message_summary(msg)
+    body = msg.get('body') or {}
+    out['body'] = {
+        'content_type': body.get('contentType'),
+        'content': body.get('content'),
+    }
+    out['attachments'] = [
+        {
+            'id': a.get('id'),
+            'name': a.get('name'),
+            'content_type': a.get('contentType'),
+            'size': a.get('size'),
+            'is_inline': a.get('isInline'),
+        }
+        for a in (msg.get('attachments') or [])
+    ]
+    return out
+
+
 def cmd_read(args):
     """Handle 'o365 mail read' command using Graph API"""
     access_token = get_access_token()
 
     # If specific message IDs provided, fetch and display those messages
     if args.ids:
+        messages = []
         for msg_id in args.ids:
             url = f"{GRAPH_API_BASE}/me/messages/{msg_id}?$expand=attachments"
             msg = make_graph_request(url, access_token)
             if not msg:
                 print(f"Error: Message not found: {msg_id}", file=sys.stderr)
                 sys.exit(1)
+            messages.append(msg)
+
+        if is_json_mode(args):
+            emit_json({'messages': [_serialize_message_full(m) for m in messages]})
+            return
+
+        for msg in messages:
             display_message(msg, html=args.html)
         return
 
     # Otherwise, list messages with filters
-    folder = args.folder or 'Inbox'
+    folder = resolve_folder(args.folder, access_token)
     # If -n not specified, show all messages (None = unlimited)
     max_count = args.count
 
@@ -559,7 +682,17 @@ def cmd_read(args):
     # Get user's domain for external sender detection
     user_domain = get_user_domain(access_token)
 
-    # Stream and display messages as they're fetched
+    # JSON: collect first, emit at end. Text: stream as fetched.
+    if is_json_mode(args):
+        collected = []
+        for page in get_messages_stream(
+            access_token, folder=folder, max_count=max_count,
+            since=since, unread=unread_filter, search=args.search,
+        ):
+            collected.extend(_serialize_message_summary(m) for m in page)
+        emit_json({'messages': collected, 'count': len(collected)})
+        return
+
     total_displayed = 0
     for page in get_messages_stream(
         access_token,
@@ -683,10 +816,9 @@ def cmd_search(args):
     # Get user's domain for external sender detection
     user_domain = get_user_domain(access_token)
 
-    # Stream and display messages as they're fetched
-    total_displayed = 0
+    # Stream messages, optionally local-filtering by --since/--unread/--read.
+    matches = []
     total_filtered = 0
-
     for page in get_messages_stream(
         access_token,
         folder='Inbox',  # Search will search all folders anyway when search param is set
@@ -696,23 +828,31 @@ def cmd_search(args):
         search=query
     ):
         for msg in page:
-            # Apply local filtering for --since if needed
             if since:
                 received = parse_graph_datetime(msg['receivedDateTime'])
                 if received < since:
                     total_filtered += 1
                     continue
-
-            # Apply local filtering for --unread if needed
             if args.unread and msg.get('isRead', True):
                 total_filtered += 1
                 continue
             elif args.read and not msg.get('isRead', False):
                 total_filtered += 1
                 continue
+            matches.append(msg)
 
-            display_message_summary(msg, user_domain)
-            total_displayed += 1
+    if is_json_mode(args):
+        emit_json({
+            'query': query,
+            'messages': [_serialize_message_summary(m) for m in matches],
+            'count': len(matches),
+            'filtered_out': total_filtered,
+        })
+        return
+
+    for msg in matches:
+        display_message_summary(msg, user_domain)
+    total_displayed = len(matches)
 
     if total_displayed == 0:
         if total_filtered > 0:
@@ -773,29 +913,245 @@ def cmd_download_attachment(args):
     print(f"  Size: {format_size(len(content))}")
 
 
+# Graph caps /me/sendMail at ~4MB total. We keep a safety margin so that
+# headers + base64 overhead don't push us over.
+_SEND_INLINE_LIMIT_BYTES = 3 * 1024 * 1024
+
+# Chunk size for resumable attachment uploads. Graph requires a multiple of
+# 320 KiB; 10 MiB keeps memory + per-chunk latency reasonable.
+_ATTACHMENT_CHUNK_SIZE = 10 * 1024 * 1024
+
+
 def cmd_send(args):
-    """Handle 'o365 mail send' command - calls trinoor.email module"""
-    cmd = ['python', '-m', 'trinoor.email']
+    """Send email via Microsoft Graph /me/sendMail.
 
-    # Pass through all arguments from sys.argv
-    # We need to find where 'send' starts and pass everything after it
-    import sys as sys_module
-    try:
-        send_idx = sys_module.argv.index('send')
-        cmd.extend(sys_module.argv[send_idx + 1:])
-    except ValueError:
-        # Fallback: just run without args to show help
-        pass
+    Uses the inline path when total attachment size is small; otherwise
+    creates a draft, uploads attachments via resumable session, then sends.
+    """
+    if args.raw:
+        print(
+            "Error: --raw (raw MIME) is not supported by the Graph backend. "
+            "Use -H/-T with body content or '-' for stdin.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if not args.recipient:
+        print("Error: at least one recipient (-r/--recipient) is required", file=sys.stderr)
+        sys.exit(2)
+
+    html_body, text_body = _resolve_send_body(args)
+    if html_body is None and text_body is None:
+        print(
+            "Error: provide a body via -H/--html or -T/--text (use '-' to read from stdin)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    message = {
+        "subject": args.subject or "",
+        "body": _build_send_body(html_body, text_body),
+        "toRecipients": _parse_send_recipients(args.recipient),
+    }
+    if args.cc:
+        message["ccRecipients"] = _parse_send_recipients(args.cc)
+    if args.bcc:
+        message["bccRecipients"] = _parse_send_recipients(args.bcc)
+    if args.header:
+        headers = _parse_send_headers(args.header)
+        if headers:
+            message["internetMessageHeaders"] = headers
+    if args.from_addr:
+        message["from"] = {"emailAddress": {"address": args.from_addr}}
+
+    attachments = []
+    for path in (args.attachment or []):
+        att = _prepare_send_attachment(path)
+        if att is None:
+            sys.exit(1)
+        attachments.append(att)
+
+    access_token = get_access_token()
+
+    has_large = any(a['size'] > _SEND_INLINE_LIMIT_BYTES for a in attachments)
+    total_size = sum(a['size'] for a in attachments)
+    use_draft_flow = has_large or total_size > _SEND_INLINE_LIMIT_BYTES
+
+    if not use_draft_flow:
+        if attachments:
+            message['attachments'] = [_inline_send_attachment(a) for a in attachments]
+        payload = {"message": message, "saveToSentItems": not args.no_save}
+        result = make_graph_request('/me/sendMail', access_token, method='POST', data=payload)
+        if result is None:
+            sys.exit(1)
+    else:
+        draft = make_graph_request('/me/messages', access_token, method='POST', data=message)
+        if not draft or 'id' not in draft:
+            print("Error: failed to create draft message", file=sys.stderr)
+            sys.exit(1)
+        message_id = draft['id']
+
+        for att in attachments:
+            if att['size'] > _SEND_INLINE_LIMIT_BYTES:
+                if not _upload_large_attachment(access_token, message_id, att):
+                    sys.exit(1)
+            else:
+                small = _inline_send_attachment(att)
+                r = make_graph_request(
+                    f'/me/messages/{message_id}/attachments',
+                    access_token, method='POST', data=small,
+                )
+                if r is None:
+                    sys.exit(1)
+
+        result = make_graph_request(
+            f'/me/messages/{message_id}/send',
+            access_token, method='POST', data={},
+        )
+        if result is None:
+            sys.exit(1)
+
+    n_to = len(args.recipient)
+    n_cc = len(args.cc or [])
+    n_bcc = len(args.bcc or [])
+    total_rcpts = n_to + n_cc + n_bcc
+    summary = f"✓ Email sent to {total_rcpts} recipient{'s' if total_rcpts != 1 else ''}"
+    if attachments:
+        summary += f" with {len(attachments)} attachment{'s' if len(attachments) != 1 else ''}"
+    print(summary)
+
+
+def _resolve_send_body(args):
+    """Return (html_body, text_body), reading stdin once if either flag is '-'."""
+    stdin_data = None
+    if args.html == '-' or args.text == '-':
+        stdin_data = sys.stdin.read()
+
+    html_body = stdin_data if args.html == '-' else args.html
+    text_body = stdin_data if args.text == '-' else args.text
+
+    if html_body is not None and text_body is None:
+        h = html2text.HTML2Text()
+        h.body_width = 0
+        h.ignore_links = False
+        text_body = h.handle(html_body)
+
+    return html_body, text_body
+
+
+def _build_send_body(html_body, text_body):
+    """Build Graph 'body' object. Prefers HTML when both are provided."""
+    if html_body is not None:
+        return {"contentType": "html", "content": html_body}
+    return {"contentType": "text", "content": text_body or ""}
+
+
+def _parse_send_recipients(items):
+    """Parse strings like 'a@x.com' or 'Name <a@x.com>' (each may be comma-separated)."""
+    parsed = getaddresses(items)
+    recipients = []
+    for name, addr in parsed:
+        if not addr:
+            continue
+        entry = {"emailAddress": {"address": addr}}
+        if name:
+            entry["emailAddress"]["name"] = name
+        recipients.append(entry)
+    return recipients
+
+
+def _parse_send_headers(items):
+    """Parse 'Header: Value' strings. Graph requires custom headers to start with x-/X-."""
+    headers = []
+    for item in items:
+        if ':' not in item:
+            print(f"Warning: skipping malformed header (no colon): {item!r}", file=sys.stderr)
+            continue
+        name, _, value = item.partition(':')
+        name = name.strip()
+        value = value.strip()
+        if not name.lower().startswith('x-'):
+            print(
+                f"Warning: Graph only accepts custom headers prefixed 'x-'; rewriting {name!r} to 'x-{name}'",
+                file=sys.stderr,
+            )
+            name = 'x-' + name
+        headers.append({"name": name, "value": value})
+    return headers
+
+
+def _prepare_send_attachment(path):
+    """Validate an attachment path and return a metadata dict."""
+    p = Path(path).expanduser()
+    if not p.exists():
+        print(f"Error: attachment not found: {path}", file=sys.stderr)
+        return None
+    if not p.is_file():
+        print(f"Error: attachment is not a regular file: {path}", file=sys.stderr)
+        return None
+    return {'name': p.name, 'size': p.stat().st_size, 'path': p}
+
+
+def _inline_send_attachment(att):
+    """Build a Graph fileAttachment dict with the file contents base64-encoded."""
+    with open(att['path'], 'rb') as f:
+        data = f.read()
+    return {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "name": att['name'],
+        "contentBytes": base64.b64encode(data).decode('ascii'),
+    }
+
+
+def _upload_large_attachment(access_token, message_id, att):
+    """Attach a file >= _SEND_INLINE_LIMIT_BYTES to a draft via createUploadSession."""
+    session_data = {
+        "AttachmentItem": {
+            "attachmentType": "file",
+            "name": att['name'],
+            "size": att['size'],
+        }
+    }
+    session = make_graph_request(
+        f'/me/messages/{message_id}/attachments/createUploadSession',
+        access_token, method='POST', data=session_data,
+    )
+    if not session or 'uploadUrl' not in session:
+        print(f"Error: failed to create upload session for {att['name']}", file=sys.stderr)
+        return False
+    upload_url = session['uploadUrl']
+    file_size = att['size']
 
     try:
-        result = subprocess.run(cmd, check=True)
-        sys.exit(result.returncode)
-    except subprocess.CalledProcessError as e:
-        sys.exit(e.returncode)
-    except FileNotFoundError:
-        print("Error: trinoor.email module not found", file=sys.stderr)
-        print("Make sure the trinoor package is installed", file=sys.stderr)
-        sys.exit(1)
+        with open(att['path'], 'rb') as f:
+            offset = 0
+            while offset < file_size:
+                chunk = f.read(_ATTACHMENT_CHUNK_SIZE)
+                end = offset + len(chunk) - 1
+                req = urllib.request.Request(
+                    upload_url, data=chunk,
+                    headers={
+                        'Content-Length': str(len(chunk)),
+                        'Content-Range': f'bytes {offset}-{end}/{file_size}',
+                    },
+                    method='PUT',
+                )
+                try:
+                    urllib.request.urlopen(req)
+                except urllib.error.HTTPError as e:
+                    err = e.read().decode(errors='replace')[:500]
+                    print(
+                        f"Error: HTTP {e.code} uploading chunk of {att['name']}: {err}",
+                        file=sys.stderr,
+                    )
+                    return False
+                pct = (end + 1) * 100.0 / file_size
+                print(f"  {att['name']}: {pct:.1f}%", file=sys.stderr)
+                offset += len(chunk)
+    except Exception as e:
+        print(f"Error during upload of {att['name']}: {e}", file=sys.stderr)
+        return False
+    return True
 
 
 # Setup and routing
@@ -803,10 +1159,14 @@ def cmd_send(args):
 def setup_parser(subparsers):
     """Setup argparse subcommands for mail"""
 
+    _parent = global_parent_parser()
+
     # o365 mail read
     read_parser = subparsers.add_parser(
         'read',
-        help='List and read emails via Graph API',
+        aliases=['list', 'ls'],
+        parents=[_parent],
+        help='List and read emails via Graph API (aliases: list, ls)',
         description='List and read emails via Microsoft Graph API.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
@@ -839,6 +1199,7 @@ def setup_parser(subparsers):
     # o365 mail archive
     archive_parser = subparsers.add_parser(
         'archive',
+        parents=[_parent],
         help='Archive emails to Archive folder',
         description='Archive emails to Archive folder using Graph API.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -857,6 +1218,7 @@ def setup_parser(subparsers):
     # o365 mail mark-read
     mark_read_parser = subparsers.add_parser(
         'mark-read',
+        parents=[_parent],
         help='Mark emails as read',
         description='Mark emails as read using Graph API.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -875,25 +1237,62 @@ def setup_parser(subparsers):
     # o365 mail send
     send_parser = subparsers.add_parser(
         'send',
-        help='Send email via SMTP',
-        description='Send emails via SMTP with automatic signature support. '
-                   'This is a wrapper around the trinoor.email module.',
-        epilog="""
-Examples:
+        parents=[_parent],
+        help='Send email via Microsoft Graph',
+        description='Send email via Microsoft Graph (/me/sendMail). '
+                   'Sends as the authenticated user; no SMTP credentials needed. '
+                   'Attachments are inlined when small and uploaded via resumable '
+                   'sessions when large (Graph caps inline sendMail at ~4MB).',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
   echo "<p>Hello!</p>" | o365 mail send -r user@example.com -S "Subject" -H -
-  o365 mail send -r user@example.com -S "Report" -H - -A report.pdf < msg.html
+  o365 mail send -r user@example.com -S "Report" -A report.pdf -H - < msg.html
   o365 mail send -r user1@example.com -r user2@example.com -S "Update" -H - < msg.html
+  o365 mail send -r "Jane Doe <jane@example.com>" -c team@example.com -S "FYI" -T "see below"
 
-For full options, see: python -m trinoor.email --help
+Body:
+  -H/--html and -T/--text accept either literal content or '-' for stdin.
+  If only -H is given, a text fallback is auto-generated via html2text.
+
+Recipients:
+  -r/--recipient (and -c/-b) may be repeated and may contain comma-separated
+  addresses or "Name <addr@x>" forms.
 """
     )
-    # Note: We're not adding arguments here because we pass everything through to trinoor.email
-    # This allows trinoor.email to handle its own argument parsing
+    send_parser.add_argument('-r', '--recipient', dest='recipient',
+                            action='append', metavar='ADDR',
+                            help='To recipient (may be repeated; "Name <a@x>" allowed)')
+    send_parser.add_argument('-c', '--cc', dest='cc',
+                            action='append', metavar='ADDR',
+                            help='Cc recipient (may be repeated)')
+    send_parser.add_argument('-b', '--bcc', dest='bcc',
+                            action='append', metavar='ADDR',
+                            help='Bcc recipient (may be repeated)')
+    send_parser.add_argument('-S', '--subject', dest='subject', metavar='SUBJECT',
+                            help='Email subject')
+    send_parser.add_argument('-A', '--attachment', dest='attachment',
+                            action='append', metavar='PATH',
+                            help='File to attach (may be repeated)')
+    send_parser.add_argument('-H', '--html', dest='html', metavar='HTML',
+                            help='HTML body (or "-" to read from stdin)')
+    send_parser.add_argument('-T', '--text', dest='text', metavar='TEXT',
+                            help='Text body (or "-" to read from stdin)')
+    send_parser.add_argument('--header', dest='header',
+                            action='append', metavar='HEADER',
+                            help='Custom header "Name: Value" (Graph requires x- prefix)')
+    send_parser.add_argument('-f', '--from', dest='from_addr', metavar='ADDR',
+                            help='From address (requires Send-As permission on that mailbox; '
+                                 'omit to send as the authenticated user)')
+    send_parser.add_argument('--no-save', dest='no_save', action='store_true',
+                            help="Don't save a copy to Sent Items")
+    send_parser.add_argument('--raw', dest='raw', metavar='PATH',
+                            help='[unsupported] Raw MIME mode (SMTP-only; not routed through Graph)')
     send_parser.set_defaults(func=cmd_send)
 
     # o365 mail search
     search_parser = subparsers.add_parser(
         'search',
+        parents=[_parent],
         help='Search emails across all folders',
         description='Search emails using Microsoft Graph full-text search. '
                    'This searches across subject, body, sender, and recipients. '
@@ -929,6 +1328,7 @@ Notes:
     # o365 mail download-attachment
     download_attachment_parser = subparsers.add_parser(
         'download-attachment',
+        parents=[_parent],
         help='Download an email attachment',
         description='Download an attachment from an email using Graph API.',
         formatter_class=argparse.RawDescriptionHelpFormatter,

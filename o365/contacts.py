@@ -5,7 +5,7 @@ Search and list personal contacts and calendar owners.
 """
 
 import sys
-from .common import get_access_token, make_graph_request, GRAPH_API_BASE
+from .common import get_access_token, make_graph_request, GRAPH_API_BASE, global_parent_parser, is_json_mode, emit_json
 
 
 def get_contacts(access_token):
@@ -152,9 +152,11 @@ def cmd_list(args):
     """Handle 'o365 contacts list' command"""
     access_token = get_access_token()
     unique_users = get_unique_users(access_token)
-
-    # Sort by name
     unique_users.sort(key=lambda x: x['name'].lower())
+
+    if is_json_mode(args):
+        emit_json({'users': unique_users, 'count': len(unique_users)})
+        return
 
     print(f"\n{'Name':<30} {'Email':<40} {'Source':<10}")
     print("=" * 80)
@@ -167,6 +169,10 @@ def cmd_search(args):
     """Handle 'o365 contacts search' command"""
     access_token = get_access_token()
     matches = search_users(args.query, access_token)
+
+    if is_json_mode(args):
+        emit_json({'query': args.query, 'matches': matches, 'count': len(matches)})
+        return
 
     if not matches:
         print(f"No users found matching '{args.query}'", file=sys.stderr)
@@ -204,9 +210,12 @@ def cmd_search(args):
 def setup_parser(subparsers):
     """Setup argparse subcommands for contacts"""
 
+    _parent = global_parent_parser()
+
     # o365 contacts list
     list_parser = subparsers.add_parser(
         'list',
+        parents=[_parent],
         help='List all contacts and calendar owners',
         description='List all contacts and calendar owners.'
     )
@@ -215,6 +224,7 @@ def setup_parser(subparsers):
     # o365 contacts search
     search_parser = subparsers.add_parser(
         'search',
+        parents=[_parent],
         help='Search for contacts by name or email',
         description='Search for contacts by name or email.',
         epilog="""
