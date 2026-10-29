@@ -330,23 +330,175 @@ def render_message(text, fmt='markdown'):
     return 'html', markdown_to_html(text)
 
 
-def send_message(access_token, chat_id, content, attachments=None,
-                 content_type='text'):
-    """Send a message to a chat
+# --- @mentions -------------------------------------------------------------
+#
+# `@[Display Name]` in a markdown or --html message becomes a real Teams
+# mention: `<at id="N">Display Name</at>` in the body plus a matching entry in
+# the message's `mentions` array. The brackets keep a bare `@` in ordinary text
+# (emails, handles) untouched. Names resolve against the target chat's members.
+
+MENTION_RE = re.compile(r'@\[([^\]\n]+)\]')
+
+# Private-use characters mark where a mention was while markdown renders, so
+# markdown-it neither escapes the <at> tag nor reads the name as markdown.
+_PH_OPEN, _PH_CLOSE = '', ''
+_PH_RE = re.compile(_PH_OPEN + r'(\d+)' + _PH_CLOSE)
+_CODE_RE = re.compile(r'(<pre\b.*?</pre>|<code\b.*?</code>)', re.DOTALL | re.IGNORECASE)
+
+
+class MentionError(Exception):
+    """A mention could not be resolved to exactly one chat member."""
+
+
+def get_chat_members(access_token, chat_id):
+    """List a chat's human members as [{'userId', 'displayName', 'email'}]."""
+    url = f"{GRAPH_API_BASE}/chats/{chat_id}/members"
+    members, seen = [], set()
+    while url:
+        result = make_graph_request(url, access_token)
+        if result is None:
+            raise MentionError(f"could not list members of chat {chat_id}")
+        for m in result.get('value', []):
+            uid = m.get('userId')
+            if uid and uid not in seen:
+                seen.add(uid)
+                members.append({
+                    'userId': uid,
+                    'displayName': m.get('displayName') or '',
+                    'email': m.get('email') or '',
+                })
+        url = result.get('@odata.nextLink')
+    return members
+
+
+def resolve_mention(name, members):
+    """Find the single chat member a mention name refers to.
+
+    Tried in order, case-insensitively, stopping at the first tier with any
+    hit: exact display name or email (or email local part), then a prefix of
+    the display name ("Luke" -> "Luke Hands"), then a prefix of any word in it
+    ("Hands" -> "Luke Hands"). More than one hit in a tier is an error.
+    """
+    want = ' '.join(name.split()).casefold()
+    if not want:
+        raise MentionError("empty mention @[]")
+
+    def exact(m):
+        email = m['email'].casefold()
+        return (m['displayName'].casefold() == want or email == want
+                or (email and email.split('@')[0] == want))
+
+    def prefix(m):
+        return m['displayName'].casefold().startswith(want)
+
+    def word_prefix(m):
+        return any(w.startswith(want) for w in m['displayName'].casefold().split())
+
+    for tier in (exact, prefix, word_prefix):
+        hits = [m for m in members if tier(m)]
+        if len(hits) == 1:
+            return hits[0]
+        if hits:
+            names = ', '.join(sorted(m['displayName'] for m in hits))
+            raise MentionError(f"@[{name}] is ambiguous, matches: {names}")
+    known = ', '.join(sorted(m['displayName'] for m in members)) or '(none)'
+    raise MentionError(f"@[{name}] matches no member of this chat. Members: {known}")
+
+
+def _extract_mentions(text):
+    """Swap each @[Name] for a placeholder. Returns (text, [names])."""
+    names = []
+
+    def sub(match):
+        names.append(match.group(1))
+        return f'{_PH_OPEN}{len(names) - 1}{_PH_CLOSE}'
+
+    return MENTION_RE.sub(sub, text), names
+
+
+def _restore_mentions(rendered, names, members_fn):
+    """Turn placeholders back into <at> tags and build the mentions array.
+
+    Placeholders inside <code>/<pre> are restored as the literal `@[Name]`
+    text, so code samples are not turned into mentions. `members_fn` is only
+    called when there is at least one real mention to resolve.
+    """
+    parts = _CODE_RE.split(rendered)
+    for i in range(1, len(parts), 2):
+        parts[i] = _PH_RE.sub(
+            lambda m: html.escape(f'@[{names[int(m.group(1))]}]', quote=False),
+            parts[i])
+
+    wanted = [int(n) for i in range(0, len(parts), 2)
+              for n in _PH_RE.findall(parts[i])]
+    if not wanted:
+        return ''.join(parts), []
+
+    members = members_fn()
+    mentions = []
+    tags = {}
+    for idx in wanted:
+        member = resolve_mention(names[idx], members)
+        mention_id = len(mentions)
+        display = member['displayName']
+        mentions.append({
+            'id': mention_id,
+            'mentionText': display,
+            'mentioned': {
+                'user': {
+                    'id': member['userId'],
+                    'displayName': display,
+                    'userIdentityType': 'aadUser',
+                }
+            },
+        })
+        tags[idx] = f'<at id="{mention_id}">{html.escape(display, quote=False)}</at>'
+    for i in range(0, len(parts), 2):
+        parts[i] = _PH_RE.sub(lambda m: tags[int(m.group(1))], parts[i])
+    return ''.join(parts), mentions
+
+
+def has_mentions(text):
+    """True if text contains any @[Name] mention syntax."""
+    return bool(MENTION_RE.search(text or ''))
+
+
+def render_message_with_mentions(text, fmt, members_fn):
+    """Like render_message(), but resolves @[Name] mentions.
 
     Args:
-        access_token: OAuth2 access token
-        chat_id: Chat ID to send to
+        text: Message text as the user wrote it
+        fmt: One of MESSAGE_FORMATS ('plain' never carries mentions)
+        members_fn: Zero-arg callable returning the chat's members (see
+            get_chat_members); only called if the message has mentions
+
+    Returns:
+        (content_type, content, mentions) where mentions is the Graph
+        `mentions` array (empty if none)
+
+    Raises:
+        MentionError: a mention matched no member, or more than one
+    """
+    if fmt == 'plain' or not has_mentions(text):
+        content_type, content = render_message(text, fmt)
+        return content_type, content, []
+    marked, names = _extract_mentions(text)
+    _, rendered = render_message(marked, fmt)
+    content, mentions = _restore_mentions(rendered, names, members_fn)
+    return 'html', content, mentions
+
+
+def build_message(content, attachments=None, content_type='text', mentions=None):
+    """Build the Graph chatMessage request body.
+
+    Args:
         content: Message content, interpreted per content_type
         attachments: Optional list of attachment dicts, each with keys:
             'id' (GUID), 'name' (filename), 'web_url' (OneDrive webUrl).
         content_type: 'text' (plain) or 'html'. See render_message().
-
-    Returns:
-        Created message object or None on error
+        mentions: Optional Graph `mentions` array matching <at id="N"> tags
+            already in an html content.
     """
-    url = f"{GRAPH_API_BASE}/chats/{chat_id}/messages"
-
     if attachments:
         # Teams requires HTML body referencing each attachment by its GUID,
         # plus a parallel attachments array with contentType=reference.
@@ -376,7 +528,28 @@ def send_message(access_token, chat_id, content, attachments=None,
                 'content': content,
             }
         }
+    if mentions:
+        message['mentions'] = mentions
+    return message
 
+
+def send_message(access_token, chat_id, content, attachments=None,
+                 content_type='text', mentions=None):
+    """Send a message to a chat
+
+    Args:
+        access_token: OAuth2 access token
+        chat_id: Chat ID to send to
+        content: Message content, interpreted per content_type
+        attachments: Optional list of attachment dicts, see build_message()
+        content_type: 'text' (plain) or 'html'. See render_message().
+        mentions: Optional Graph `mentions` array, see build_message()
+
+    Returns:
+        Created message object or None on error
+    """
+    url = f"{GRAPH_API_BASE}/chats/{chat_id}/messages"
+    message = build_message(content, attachments, content_type, mentions)
     return make_graph_request(url, access_token, method='POST', data=message)
 
 
@@ -1038,12 +1211,25 @@ def cmd_send(args):
     access_token = get_access_token()
 
     files = args.files or []
+    dry_run = getattr(args, 'dry_run', False) is True
+    extra_mentions = getattr(args, 'mentions', None)
+    extra_mentions = extra_mentions if isinstance(extra_mentions, list) else []
     message = _read_message_arg(args.message)
-    if not message and not files:
+    if not message and not files and not extra_mentions:
         print("Error: Must specify -m/--message and/or -f/--file", file=sys.stderr)
         sys.exit(1)
     fmt = getattr(args, 'format', None) or 'markdown'
-    content_type, content = render_message(message, fmt) if message else ('text', '')
+
+    if extra_mentions:
+        if fmt == 'plain':
+            print("Error: --mention needs a rich-text message; drop --plain",
+                  file=sys.stderr)
+            sys.exit(1)
+        lead = ' '.join(f'@[{name}]' for name in extra_mentions)
+        message = f'{lead} {message}' if message else lead
+    if fmt == 'plain' and has_mentions(message):
+        print("Warning: --plain sends @[Name] as literal text, not a mention",
+              file=sys.stderr)
 
     # Resolve chat ID
     if args.chat_id:
@@ -1074,6 +1260,19 @@ def cmd_send(args):
         print("Error: Must specify --chat or --to", file=sys.stderr)
         sys.exit(1)
 
+    # Render the message, resolving any @[Name] mentions against the chat's
+    # members (only looked up when the message actually mentions someone).
+    mentions = []
+    if message:
+        try:
+            content_type, content, mentions = render_message_with_mentions(
+                message, fmt, lambda: get_chat_members(access_token, chat_id))
+        except MentionError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        content_type, content = 'text', ''
+
     # Upload any attached files to OneDrive (Teams convention: place them in
     # "Microsoft Teams Chat Files/" so they live alongside files the Teams
     # client itself uploads), then build reference attachments for the message.
@@ -1083,6 +1282,15 @@ def cmd_send(args):
         if not src.exists():
             print(f"Error: File not found: {local_path}", file=sys.stderr)
             sys.exit(1)
+
+        if dry_run:
+            # Nothing is uploaded on a dry run; show where the link would go.
+            attachments.append({
+                'id': str(uuid.uuid4()),
+                'name': src.name,
+                'web_url': f'<sharing link for {src.name}, created on send>',
+            })
+            continue
 
         print(f"Uploading {src.name}...", file=sys.stderr)
         uploaded = upload_file(
@@ -1118,9 +1326,19 @@ def cmd_send(args):
             'web_url': share_url,
         })
 
+    if dry_run:
+        import json
+        print(json.dumps({
+            'method': 'POST',
+            'url': f"{GRAPH_API_BASE}/chats/{chat_id}/messages",
+            'body': build_message(content, attachments, content_type, mentions),
+        }, indent=2, ensure_ascii=False))
+        return
+
     # Send message (with attachments if any)
     result = send_message(access_token, chat_id, content,
-                          attachments=attachments, content_type=content_type)
+                          attachments=attachments, content_type=content_type,
+                          mentions=mentions)
 
     if result:
         if attachments:
@@ -1377,13 +1595,21 @@ def setup_parser(subparsers):
         description='Send a message to a Microsoft Teams chat.\n\n'
                     'The message is markdown, sent as rich text (bold, lists,\n'
                     'headings, tables, code blocks). Line breaks are kept as\n'
-                    'written, so plain text comes through unchanged.',
+                    'written, so plain text comes through unchanged.\n\n'
+                    'Mentions: write @[Name] to @mention a chat member. Name is\n'
+                    'their display name, email, or a unique prefix of either\n'
+                    'the name or one word of it (@[Luke] for Luke Hands).\n'
+                    'Works with --html too; not with --plain. A bare @ is\n'
+                    'left alone, and @[...] inside `code` is not a mention.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   o365 chat send --to "Luke Hands" -m "**done**, see below"
   o365 chat send --chat <id> -m - < notes.md      # markdown from stdin
   cat <<'EOF' | o365 chat send --chat <id> -m -   # no shell quoting needed
   o365 chat send --chat <id> -m "see attached" -f report.pdf
+  o365 chat send --chat <id> -m "@[Luke] can you review?"
+  o365 chat send --chat <id> --mention Luke --mention Roman -m "deployed"
+  o365 chat send --chat <id> -m "@[Luke] hi" --dry-run   # print, don't send
 """
     )
 
@@ -1406,6 +1632,13 @@ def setup_parser(subparsers):
     fmt_group.add_argument('--html', dest='format', action='store_const',
                            const='html', help='Message is already Teams HTML')
     send_parser.set_defaults(format='markdown')
+    send_parser.add_argument('--mention', dest='mentions', action='append',
+                            metavar='NAME', default=[],
+                            help='@mention a chat member at the start of the '
+                                 'message (repeatable); same as writing @[NAME]')
+    send_parser.add_argument('--dry-run', action='store_true',
+                            help='Print the Graph request as JSON instead of '
+                                 'sending it (no files are uploaded)')
 
     send_parser.set_defaults(func=cmd_send)
 
