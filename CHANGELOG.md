@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.0 — 2026-10-29
+
+### Added
+
+- **@mentions in `chat send`.** `@[Name]` in a markdown or `--html` message
+  becomes a real Teams mention (`<at id="N">` in the body plus the Graph
+  `mentions` array). Names resolve against the chat's members
+  (`GET /chats/{id}/members`, only fetched when the message mentions
+  someone): exact display name / email, then a unique prefix of the name
+  (`@[Luke]`), then a unique prefix of any word in it. Ambiguous or unknown
+  names fail with the candidate list and nothing is sent. Bare `@` text and
+  `@[...]` inside code are untouched. Works with `-f` attachments.
+  `--plain` sends `@[Name]` literally with a warning.
+- **`chat send --mention NAME`** (repeatable): mention someone at the start
+  of the message without editing its text.
+- **`chat send --dry-run`**: print the Graph request (URL + JSON body)
+  instead of sending; files are not uploaded.
+
 ## 1.1.0 — 2026-10-28
 
 A round of CLI ergonomics work aimed at making the tool intuitive for new

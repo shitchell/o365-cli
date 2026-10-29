@@ -169,12 +169,28 @@ o365 chat send --chat <chat-id> -m - < notes.md   # long message from stdin/file
 o365 chat send --chat <chat-id> -m "see attached" -f report.pdf
 o365 chat send --chat <chat-id> --plain -m "*literal* text"   # no markdown
 o365 chat send --chat <chat-id> --html -m "<p><b>raw</b> HTML</p>"
+o365 chat send --chat <chat-id> -m "@[Luke] can you review?"   # @mention
+o365 chat send --chat <chat-id> --mention Luke -m "deployed"  # same, as a flag
+o365 chat send --chat <chat-id> -m "@[Luke] hi" --dry-run      # print JSON, don't send
 ```
 
 Chat messages are markdown: headings, bold/italic, bullet and numbered
 lists, tables, links, inline code and fenced code blocks all render in
 Teams. Single line breaks are kept, so plain text arrives as written. Raw
 HTML inside markdown is escaped; use `--html` to send HTML directly.
+
+**@mentions:** write `@[Name]` to mention a chat member (a real Teams
+mention that notifies them). `Name` is matched case-insensitively against
+the chat's members: exact display name or email (or its local part) first,
+then a unique prefix of the display name (`@[Luke]`), then a unique prefix
+of any word in it (`@[Hands]`). No match or more than one match is an
+error that lists the candidates, and nothing is sent. A bare `@` (emails,
+handles) is left alone, and `@[...]` inside inline code or code blocks
+stays literal. `--mention NAME` (repeatable) puts mentions at the start of
+the message. Mentions work in markdown and `--html` messages and with `-f`
+attachments; `--plain` cannot carry them (`@[Name]` is sent literally with
+a warning, and `--mention` with `--plain` is an error). `--dry-run` prints
+the Graph request instead of sending it, without uploading any files.
 
 ```bash
 # Search messages
