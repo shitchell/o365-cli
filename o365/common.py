@@ -344,6 +344,36 @@ def make_graph_request(url, access_token, method="GET", data=None):
         return None
 
 
+class GraphRequestError(Exception):
+    """A Graph request failed (make_graph_request already printed why)."""
+
+
+def iter_graph_pages(url, access_token, request=None, strict=False):
+    """Yield each page of a paged Graph collection, following @odata.nextLink.
+
+    The one place that walks nextLink chains. Callers decide when to stop
+    (just stop iterating); no further pages are requested after that.
+
+    Args:
+        url: First page URL (full URL, or endpoint starting with '/')
+        access_token: OAuth2 access token
+        request: Callable(url, access_token) -> dict|None. Defaults to
+            make_graph_request; modules pass their own imported reference
+            so tests that patch `<module>.make_graph_request` keep working.
+        strict: If True, raise GraphRequestError when a page fails instead
+            of ending the iteration quietly.
+    """
+    request = request or make_graph_request
+    while url:
+        page = request(url, access_token)
+        if page is None:
+            if strict:
+                raise GraphRequestError(url)
+            return
+        yield page
+        url = page.get('@odata.nextLink')
+
+
 def global_parent_parser():
     """Return a fresh parent parser carrying flags every leaf command should expose.
 

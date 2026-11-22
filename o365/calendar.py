@@ -350,7 +350,7 @@ def display_events(events, start_date, end_date, user_email=None):
 
     for event in events:
         subject = event.get('subject', '(No subject)')
-        location = event.get('location', {}).get('displayName', '')
+        location = (event.get('location') or {}).get('displayName') or ''
 
         # Parse UTC time from Graph API and convert to local
         start_dt = parse_graph_datetime(event['start']['dateTime']).astimezone(LOCAL_TZ)
@@ -401,30 +401,34 @@ def get_events_structured(access_token, start_date, end_date, user_email=None):
     # Transform to structured format
     structured_events = []
     for event in events:
+        organizer = (event.get('organizer') or {}).get('emailAddress') or {}
         structured_event = {
             'id': event.get('id', ''),
             'subject': event.get('subject', '(No subject)'),
-            'start_datetime': event.get('start', {}).get('dateTime', ''),
-            'end_datetime': event.get('end', {}).get('dateTime', ''),
-            'location': event.get('location', {}).get('displayName', ''),
-            'organizer_name': event.get('organizer', {}).get('emailAddress', {}).get('name', ''),
-            'organizer_email': event.get('organizer', {}).get('emailAddress', {}).get('address', ''),
+            'start_datetime': (event.get('start') or {}).get('dateTime') or '',
+            'end_datetime': (event.get('end') or {}).get('dateTime') or '',
+            'location': (event.get('location') or {}).get('displayName') or '',
+            'organizer_name': organizer.get('name') or '',
+            'organizer_email': organizer.get('address') or '',
             'attendees': [],
             'is_online_meeting': event.get('isOnlineMeeting', False),
-            'online_meeting_url': event.get('onlineMeeting', {}).get('joinUrl', ''),
+            'online_meeting_url': (event.get('onlineMeeting') or {}).get('joinUrl')
+            or '',
             'body_preview': event.get('bodyPreview', ''),
-            'body_content': event.get('body', {}).get('content', '')
+            'body_content': (event.get('body') or {}).get('content') or '',
         }
 
         # Parse attendees
-        for attendee in event.get('attendees', []):
-            email_address = attendee.get('emailAddress', {})
-            structured_event['attendees'].append({
-                'name': email_address.get('name', ''),
-                'email': email_address.get('address', ''),
-                'type': attendee.get('type', ''),
-                'status': attendee.get('status', {}).get('response', '')
-            })
+        for attendee in event.get('attendees') or []:
+            email_address = attendee.get('emailAddress') or {}
+            structured_event['attendees'].append(
+                {
+                    'name': email_address.get('name', ''),
+                    'email': email_address.get('address', ''),
+                    'type': attendee.get('type', ''),
+                    'status': (attendee.get('status') or {}).get('response') or '',
+                }
+            )
 
         structured_events.append(structured_event)
 
@@ -490,11 +494,12 @@ def create_event_structured(access_token, title, start_time, duration,
             'event': {
                 'id': event.get('id', ''),
                 'subject': event.get('subject', ''),
-                'start_datetime': event.get('start', {}).get('dateTime', ''),
-                'end_datetime': event.get('end', {}).get('dateTime', ''),
-                'location': event.get('location', {}).get('displayName', ''),
-                'online_meeting_url': event.get('onlineMeeting', {}).get('joinUrl', '')
-            }
+                'start_datetime': (event.get('start') or {}).get('dateTime') or '',
+                'end_datetime': (event.get('end') or {}).get('dateTime') or '',
+                'location': (event.get('location') or {}).get('displayName') or '',
+                'online_meeting_url': (event.get('onlineMeeting') or {}).get('joinUrl')
+                or '',
+            },
         }
 
     except Exception as e:
@@ -732,7 +737,7 @@ def cmd_create(args):
         print(f"  Location: {args.location}")
     if args.online_meeting:
         print(f"  Teams meeting: Yes")
-        if event.get('onlineMeeting', {}).get('joinUrl'):
+        if (event.get('onlineMeeting') or {}).get('joinUrl'):
             print(f"  Join URL: {event['onlineMeeting']['joinUrl']}")
     if args.description:
         print(f"  Description: {args.description}")
