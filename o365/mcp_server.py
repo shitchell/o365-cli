@@ -465,20 +465,30 @@ def upload_onedrive_file(
 # TEAMS CHAT TOOLS
 # ============================================================================
 
+
 @mcp.tool()
-def list_teams_chats(count: int = 50) -> dict:
+def list_teams_chats(count: int = 50, since: str | None = None) -> dict:
     """
-    List Teams chats.
+    List Teams chats, most recently active first.
 
     Args:
         count: Maximum number of chats to return (default: 50)
+        since: Only chats with a message since this time (e.g., '3 days ago') (optional)
 
     Returns:
         Dictionary with 'status' and 'chats' list
     """
     try:
         access_token = get_access_token()
-        chats = get_chats_structured(access_token, count=count)
+
+        kwargs = {'count': count}
+        if since:
+            try:
+                kwargs['since'] = parse_since_expression(since)
+            except ValueError as e:
+                return {'status': 'error', 'error': f'Invalid since parameter: {e}'}
+
+        chats = get_chats_structured(access_token, **kwargs)
 
         return {
             'status': 'success',

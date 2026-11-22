@@ -11,7 +11,16 @@ import html
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
-from .common import get_access_token, make_graph_request, GRAPH_API_BASE, global_parent_parser, is_json_mode, emit_json
+from .common import (
+    get_access_token,
+    make_graph_request,
+    GRAPH_API_BASE,
+    global_parent_parser,
+    is_json_mode,
+    emit_json,
+    iter_graph_pages,
+    GraphRequestError,
+)
 from .contacts import search_users
 from .calendar import parse_since_expression
 
@@ -37,43 +46,80 @@ def parse_graph_datetime(dt_str):
     return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
 
 
-def get_chats(access_token, count=50):
-    """Get user's chats with members expanded
+# Graph caps $top at 50 for both /me/chats and /chats/{id}/messages.
+GRAPH_MAX_PAGE_SIZE = 50
+
+
+def _graph_pages(url, access_token, strict=False):
+    """Page through a Graph collection via the shared nextLink walker.
+
+    Passes this module's make_graph_request so tests patching
+    `o365.chat.make_graph_request` intercept every page.
+    """
+    return iter_graph_pages(
+        url, access_token, request=make_graph_request, strict=strict
+    )
+
+
+def _graph_items(url, access_token):
+    """Yield every non-null item across all pages of a Graph collection."""
+    for page in _graph_pages(url, access_token):
+        for item in page.get('value') or []:
+            if item is not None:
+                yield item
+
+
+def _chats_url(page_size=GRAPH_MAX_PAGE_SIZE):
+    """URL for /me/chats, most recently active first.
+
+    `lastMessagePreview` must be in $expand: Graph omits it otherwise (even
+    though we order by it), which silently broke `chat list --since` and
+    left last_message_* empty in --json/MCP output.
+    """
+    params = {
+        '$expand': 'members,lastMessagePreview',
+        '$top': str(min(page_size, GRAPH_MAX_PAGE_SIZE)),
+        '$orderby': 'lastMessagePreview/createdDateTime desc',
+    }
+    return f'{GRAPH_API_BASE}/me/chats?{urllib.parse.urlencode(params)}'
+
+
+def chat_last_activity(chat):
+    """Datetime of a chat's last message, or None if Graph gave no preview.
+
+    `lastUpdatedDateTime` is NOT used: it tracks chat metadata changes
+    (rename, membership), not message activity.
+    """
+    created = ((chat or {}).get('lastMessagePreview') or {}).get('createdDateTime')
+    return parse_graph_datetime(created) if created else None
+
+
+def get_chats(access_token, count=50, since=None):
+    """Get user's chats with members expanded, most recently active first.
 
     Args:
         access_token: OAuth2 access token
-        count: Maximum number of chats to retrieve
+        count: Maximum number of chats to return (pages past Graph's 50 cap)
+        since: Optional aware datetime; only chats whose last message is at
+            or after it. Graph can't $filter on this, so it is applied here;
+            the scan stops at the first older chat (results are ordered by
+            last message, newest first).
 
     Returns:
         List of chat objects with members
     """
-    # Graph API limits $top to 50 for /me/chats
-    page_size = min(count, 50)
-
-    url = f"{GRAPH_API_BASE}/me/chats"
-    params = {
-        '$expand': 'members',
-        '$top': str(page_size),
-        '$orderby': 'lastMessagePreview/createdDateTime desc'
-    }
-
-    query_string = urllib.parse.urlencode(params)
-    url = f"{url}?{query_string}"
-
+    page_size = GRAPH_MAX_PAGE_SIZE if since is not None or not count else count
     chats = []
-    while url:
-        result = make_graph_request(url, access_token)
-        if not result:
+    for chat in _graph_items(_chats_url(page_size), access_token):
+        if since is not None:
+            last = chat_last_activity(chat)
+            if last is None:
+                continue
+            if last < since:
+                break
+        chats.append(chat)
+        if count and len(chats) >= count:
             break
-
-        chats.extend(result.get('value', []))
-        url = result.get('@odata.nextLink')
-
-        # Respect count limit
-        if len(chats) >= count:
-            chats = chats[:count]
-            break
-
     return chats
 
 
@@ -137,21 +183,9 @@ def find_chats_by_user_or_name(query, access_token):
     user_emails = [u['email'].lower() for u in user_matches] if user_matches else []
     query_lower = query.lower()
 
-    url = f"{GRAPH_API_BASE}/me/chats"
-    params = {
-        '$expand': 'members',
-        '$top': '50',
-        '$orderby': 'lastMessagePreview/createdDateTime desc'
-    }
-    url = f"{url}?{urllib.parse.urlencode(params)}"
-
     filtered = []
-    while url:
-        result = make_graph_request(url, access_token)
-        if not result:
-            break
-
-        for chat in result.get('value', []):
+    for result in _graph_pages(_chats_url(), access_token):
+        for chat in result.get('value') or []:
             if chat is None:
                 continue
 
@@ -162,7 +196,7 @@ def find_chats_by_user_or_name(query, access_token):
                 continue
 
             # Check members
-            for member in chat.get('members', []):
+            for member in chat.get('members') or []:
                 user_principal = (member.get('email') or '').lower()
                 display_name = (member.get('displayName') or '').lower()
                 if user_principal in user_emails or query_lower in display_name:
@@ -170,11 +204,8 @@ def find_chats_by_user_or_name(query, access_token):
                     break
 
         # If we found 1:1 matches, stop early -- no need to keep paginating
-        one_on_one = [c for c in filtered if c.get('chatType') == 'oneOnOne']
-        if one_on_one:
+        if any(c.get('chatType') == 'oneOnOne' for c in filtered):
             break
-
-        url = result.get('@odata.nextLink')
 
     return filtered
 
@@ -222,61 +253,130 @@ def get_chat_display_name(chat):
     return f"Group({total_members}): {label}"
 
 
+def iter_chat_messages(access_token, chat_id):
+    """Yield a chat's messages newest first, paging through @odata.nextLink.
+
+    Graph's pages are often shorter than $top (28 of 50 is common), so
+    callers stop iterating when they have enough rather than counting pages.
+    Ordering is newest first, which lets `since` filters stop at the first
+    older message.
+    """
+    params = {'$top': str(GRAPH_MAX_PAGE_SIZE), '$orderby': 'createdDateTime desc'}
+    url = f'{GRAPH_API_BASE}/chats/{chat_id}/messages?{urllib.parse.urlencode(params)}'
+    return _graph_items(url, access_token)
+
+
+def _message_time(msg):
+    created = msg.get('createdDateTime')
+    return parse_graph_datetime(created) if created else None
+
+
 def get_chat_messages(access_token, chat_id, count=50, since=None, fetch_all=False):
-    """Get messages from a chat
+    """Get messages from a chat, oldest first.
 
     Args:
         access_token: OAuth2 access token
         chat_id: Chat ID
-        count: Maximum number of messages to retrieve (None for unlimited if fetch_all=True)
-        since: Optional datetime to filter messages after
-        fetch_all: If True, fetch all messages with pagination (ignores count limit)
+        count: Maximum number of messages (pages past Graph's 50 cap);
+            None/0 or fetch_all=True for no limit
+        since: Optional aware datetime; stop at the first older message
+            (messages arrive newest first, so nothing later can match)
+        fetch_all: If True, ignore count
 
     Returns:
-        List of message objects
+        List of message objects, oldest first
     """
-    url = f"{GRAPH_API_BASE}/chats/{chat_id}/messages"
-
-    # Use max allowed page size (API limit is 50)
-    page_size = 50
-    params = {
-        '$top': str(page_size),
-        '$orderby': 'createdDateTime desc'
-    }
-
-    # Note: Chat messages API doesn't support $filter by createdDateTime or body content
-    # We fetch messages and filter locally instead
-
-    query_string = urllib.parse.urlencode(params)
-    url = f"{url}?{query_string}"
-
     messages = []
-    while url:
-        result = make_graph_request(url, access_token)
-        if not result:
-            break
-
-        for msg in result.get('value', []):
-            # Apply local date filter
-            if since:
-                msg_date = parse_graph_datetime(msg['createdDateTime'])
-                if msg_date < since:
-                    continue
-            messages.append(msg)
-
-            # Check count limit only if not fetching all
-            if not fetch_all and count and len(messages) >= count:
+    for msg in iter_chat_messages(access_token, chat_id):
+        if since is not None:
+            created = _message_time(msg)
+            if created is not None and created < since:
                 break
-
-        url = result.get('@odata.nextLink')
-
-        # Stop if we've reached count limit (only when not fetching all)
+        messages.append(msg)
         if not fetch_all and count and len(messages) >= count:
-            messages = messages[:count]
             break
 
-    # Reverse to show oldest first
     return list(reversed(messages))
+
+
+def _html_to_text(content, content_type):
+    """Strip tags + unescape entities from an HTML body; pass text through."""
+    content = content or ''
+    if content_type == 'html':
+        content = html.unescape(re.sub(r'<[^>]+>', '', content))
+    return content
+
+
+def _humanize_event(odata_type):
+    """'#microsoft.graph.membersAddedEventMessageDetail' -> 'membersAdded'."""
+    name = (odata_type or '').rsplit('.', 1)[-1]
+    for suffix in ('EventMessageDetail', 'MessageDetail'):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name or None
+
+
+def _describe_event(event_type, detail):
+    """One-line label for a system event message, e.g. '[members added: 2]'."""
+    words = re.sub(r'(?<!^)(?=[A-Z])', ' ', event_type).lower()
+    extra = None
+    if 'members' in detail:
+        extra = str(len(detail.get('members') or []))
+    elif detail.get('chatDisplayName'):
+        extra = detail['chatDisplayName']
+    elif detail.get('callDuration'):
+        extra = detail['callDuration']
+    return f'[{words}: {extra}]' if extra else f'[{words}]'
+
+
+def normalize_chat_message(msg):
+    """Flatten a Graph chatMessage into one null-safe shape.
+
+    The single place that reads `from`, `body` and `eventDetail`, so every
+    consumer (CLI text + --json, search, MCP/structured) handles system,
+    bot and meeting-event messages the same way. Graph sends `from: null`
+    for system events, `from.user: null` with `from.application` for bots,
+    and nulls inside `user` for deleted accounts.
+
+    Returns:
+        dict: id, created, sender_name, sender_email, sender_id, is_system,
+        event_type (e.g. 'membersAdded', or None), text (plain text),
+        content_type, attachments
+    """
+    sender = msg.get('from') or {}
+    user = sender.get('user') or {}
+    app = sender.get('application') or sender.get('device') or {}
+    detail = msg.get('eventDetail') or {}
+    event_type = _humanize_event(detail.get('@odata.type')) if detail else None
+    is_system = not sender or bool(event_type)
+
+    if user:
+        sender_name = user.get('displayName') or 'Unknown'
+    elif app:
+        sender_name = app.get('displayName') or 'Unknown'
+    else:
+        sender_name = 'System'
+
+    body = msg.get('body') or {}
+    content_type = body.get('contentType') or 'text'
+    if event_type:
+        text = _describe_event(event_type, detail)
+    else:
+        text = _html_to_text(body.get('content'), content_type)
+
+    return {
+        'id': msg.get('id') or '',
+        'created': msg.get('createdDateTime') or '',
+        'sender_name': sender_name,
+        'sender_email': user.get('userPrincipalName') or '',
+        'sender_id': user.get('id') or app.get('id'),
+        'is_system': is_system,
+        'event_type': event_type,
+        'text': text,
+        'content_type': content_type,
+        'attachments': msg.get('attachments') or [],
+    }
 
 
 # Message formats accepted by `chat send`. Markdown is the default because it
@@ -354,20 +454,21 @@ def get_chat_members(access_token, chat_id):
     """List a chat's human members as [{'userId', 'displayName', 'email'}]."""
     url = f"{GRAPH_API_BASE}/chats/{chat_id}/members"
     members, seen = [], set()
-    while url:
-        result = make_graph_request(url, access_token)
-        if result is None:
-            raise MentionError(f"could not list members of chat {chat_id}")
-        for m in result.get('value', []):
-            uid = m.get('userId')
-            if uid and uid not in seen:
-                seen.add(uid)
-                members.append({
-                    'userId': uid,
-                    'displayName': m.get('displayName') or '',
-                    'email': m.get('email') or '',
-                })
-        url = result.get('@odata.nextLink')
+    try:
+        for result in _graph_pages(url, access_token, strict=True):
+            for m in result.get('value') or []:
+                uid = (m or {}).get('userId')
+                if uid and uid not in seen:
+                    seen.add(uid)
+                    members.append(
+                        {
+                            'userId': uid,
+                            'displayName': m.get('displayName') or '',
+                            'email': m.get('email') or '',
+                        }
+                    )
+    except GraphRequestError:
+        raise MentionError(f'could not list members of chat {chat_id}')
     return members
 
 
@@ -564,30 +665,23 @@ def _fetch_preceding_messages(access_token, chat_id, hit_time_str, n):
         return []
     hit_time = parse_graph_datetime(hit_time_str)
 
-    # Pull a small window and filter locally — Graph chat-message $filter
-    # support is limited, so it's simpler to grab the recent batch and
-    # walk it. We need slightly more than n because the hit itself is in
-    # the response and other messages after the hit may be in the window.
-    url = f"{GRAPH_API_BASE}/me/chats/{chat_id}/messages?$top={max(n * 3, 20)}"
-    resp = make_graph_request(url, access_token)
-    if not resp:
-        return []
-
+    # Walk newest-first from the top of the chat until we're past the hit,
+    # then take the next n. Pages as far back as the hit requires (the old
+    # single-request window missed context for older hits, and asked for
+    # $top above Graph's 50 cap once n > 16).
     preceding = []
-    for m in resp.get('value', []):
-        mt_str = m.get('createdDateTime')
-        if not mt_str:
-            continue
+    for m in iter_chat_messages(access_token, chat_id):
         try:
-            mt = parse_graph_datetime(mt_str)
+            mt = _message_time(m)
         except Exception:
             continue
-        if mt < hit_time:
-            preceding.append((mt, m))
+        if mt is None or mt >= hit_time:
+            continue
+        preceding.append(m)
+        if len(preceding) >= n:
+            break
 
-    # Sort ascending, take the last n (closest to the hit)
-    preceding.sort(key=lambda x: x[0])
-    return [m for _, m in preceding[-n:]]
+    return list(reversed(preceding))
 
 
 def _normalize_search_hit(hit):
@@ -763,7 +857,7 @@ def search_messages(access_token, query, chats=None, count=50, since=None, fetch
                 if msg_date < since:
                     continue
 
-            body = msg.get('body', {}).get('content', '').lower()
+            body = ((msg.get('body') or {}).get('content') or '').lower()
             if query_lower in body:
                 results.append((chat, msg))
 
@@ -777,13 +871,15 @@ def search_messages(access_token, query, chats=None, count=50, since=None, fetch
 # STRUCTURED DATA FUNCTIONS (for MCP and programmatic access)
 # ============================================================================
 
-def get_chats_structured(access_token, count=50):
+
+def get_chats_structured(access_token, count=50, since=None):
     """
     Get user's chats as structured data (for MCP/programmatic use).
 
     Args:
         access_token: OAuth2 access token
         count: Maximum number of chats to retrieve
+        since: Optional aware datetime; only chats active since then
 
     Returns:
         list[dict]: List of chat dictionaries with schema:
@@ -797,29 +893,36 @@ def get_chats_structured(access_token, count=50):
                 'last_message_preview': str
             }
     """
-    chats = get_chats(access_token, count)
+    chats = get_chats(access_token, count, since=since)
 
     structured_chats = []
     for chat in chats:
         members = []
-        for member in chat.get('members', []):
-            members.append({
-                'display_name': member.get('displayName', ''),
-                'email': member.get('email', ''),
-                'user_id': member.get('userId', '')
-            })
+        for member in chat.get('members') or []:
+            members.append(
+                {
+                    'display_name': member.get('displayName') or '',
+                    'email': member.get('email') or '',
+                    'user_id': member.get('userId') or '',
+                }
+            )
 
-        last_msg_preview = chat.get('lastMessagePreview', {})
+        last_msg_preview = chat.get('lastMessagePreview') or {}
+        preview_body = last_msg_preview.get('body') or {}
 
-        structured_chats.append({
-            'id': chat.get('id', ''),
-            'chat_type': chat.get('chatType', ''),
-            'topic': chat.get('topic', ''),
-            'display_name': get_chat_display_name(chat),
-            'members': members,
-            'last_message_datetime': last_msg_preview.get('createdDateTime', ''),
-            'last_message_preview': last_msg_preview.get('body', {}).get('content', '')
-        })
+        structured_chats.append(
+            {
+                'id': chat.get('id', ''),
+                'chat_type': chat.get('chatType', ''),
+                'topic': chat.get('topic') or '',
+                'display_name': get_chat_display_name(chat),
+                'members': members,
+                'last_message_datetime': last_msg_preview.get('createdDateTime') or '',
+                'last_message_preview': _html_to_text(
+                    preview_body.get('content'), preview_body.get('contentType')
+                ),
+            }
+        )
 
     return structured_chats
 
@@ -843,34 +946,28 @@ def get_chat_messages_structured(access_token, chat_id, count=50, since=None):
                 'sender_email': str,
                 'content': str,
                 'content_type': str,
-                'attachments': list[dict]
+                'attachments': list[dict],
+                'is_system': bool,
+                'event_type': str | None  (e.g. 'membersAdded')
             }
     """
     messages = get_chat_messages(access_token, chat_id, count, since)
+    return [_structured_message(normalize_chat_message(msg)) for msg in messages]
 
-    structured_messages = []
-    for msg in messages:
-        sender = (msg.get('from') or {}).get('user') or {}
-        body = msg.get('body') or {}
 
-        # Clean HTML content
-        content = body.get('content', '')
-        content_type = body.get('contentType', 'text')
-        if content_type == 'html':
-            # Simple HTML stripping
-            content = html.unescape(re.sub(r'<[^>]+>', '', content))
-
-        structured_messages.append({
-            'id': msg.get('id', ''),
-            'created_datetime': msg.get('createdDateTime', ''),
-            'sender_name': sender.get('displayName', '') or 'System',
-            'sender_email': sender.get('userPrincipalName', ''),
-            'content': content,
-            'content_type': content_type,
-            'attachments': msg.get('attachments', [])
-        })
-
-    return structured_messages
+def _structured_message(n):
+    """Map a normalize_chat_message() dict onto the structured/MCP schema."""
+    return {
+        'id': n['id'],
+        'created_datetime': n['created'],
+        'sender_name': n['sender_name'],
+        'sender_email': n['sender_email'],
+        'content': n['text'],
+        'content_type': n['content_type'],
+        'attachments': n['attachments'],
+        'is_system': n['is_system'],
+        'event_type': n['event_type'],
+    }
 
 
 def send_message_structured(access_token, chat_id, content):
@@ -983,25 +1080,19 @@ def search_messages_structured(access_token, query, chats=None, count=50, since=
             chat_id = chat.get('id', '')
             chat_name = get_chat_display_name(chat)
 
-        sender = (msg.get('from') or {}).get('user') or {}
-        body = msg.get('body') or {}
-
-        # Clean HTML content
-        content = body.get('content', '')
-        content_type = body.get('contentType', 'text')
-        if content_type == 'html':
-            content = html.unescape(re.sub(r'<[^>]+>', '', content))
-
-        structured_results.append({
-            'chat_id': chat_id,
-            'chat_name': chat_name,
-            'message_id': msg.get('id', ''),
-            'created_datetime': msg.get('createdDateTime', ''),
-            'sender_name': sender.get('displayName', '') or 'System',
-            'sender_email': sender.get('userPrincipalName', ''),
-            'content': content,
-            'content_type': content_type
-        })
+        n = normalize_chat_message(msg)
+        structured_results.append(
+            {
+                'chat_id': chat_id,
+                'chat_name': chat_name,
+                'message_id': n['id'],
+                'created_datetime': n['created'],
+                'sender_name': n['sender_name'],
+                'sender_email': n['sender_email'],
+                'content': n['text'],
+                'content_type': n['content_type'],
+            }
+        )
 
     return structured_results
 
@@ -1016,35 +1107,33 @@ def cmd_list(args):
     """Handle 'o365 chat list' command"""
     access_token = get_access_token()
 
+    since_date = None
+    if args.since:
+        try:
+            since_date = parse_since_expression(args.since)
+        except ValueError as e:
+            print(f'Error in --since: {e}', file=sys.stderr)
+            sys.exit(1)
+
     # Get chats (use deep search when filtering by user)
     if args.with_user:
         chats = find_chats_by_user_or_name(args.with_user, access_token)
+        if since_date is not None:
+            chats = [
+                c
+                for c in chats
+                if (last := chat_last_activity(c)) is not None and last >= since_date
+            ]
 
         if not chats:
             print(f"No chats found with '{args.with_user}'")
             return
     else:
-        chats = get_chats(access_token, count=args.count or 50)
+        chats = get_chats(access_token, count=args.count or 50, since=since_date)
 
         if not chats:
             print("No chats found")
             return
-
-    # Apply --since filter
-    if args.since:
-        try:
-            since_date = parse_since_expression(args.since)
-            filtered = []
-            for chat in chats:
-                last_msg = chat.get('lastMessagePreview')
-                if last_msg and last_msg.get('createdDateTime'):
-                    msg_date = parse_graph_datetime(last_msg['createdDateTime'])
-                    if msg_date >= since_date:
-                        filtered.append(chat)
-            chats = filtered
-        except ValueError as e:
-            print(f"Error in --since: {e}", file=sys.stderr)
-            sys.exit(1)
 
     if is_json_mode(args):
         emit_json({
@@ -1095,20 +1184,18 @@ def _serialize_chat(chat):
 
 def _serialize_chat_message(msg):
     """Serialize a Graph chat message for --json output."""
-    body_obj = msg.get('body') or {}
-    body_content = body_obj.get('content') or ''
-    if body_obj.get('contentType') == 'html':
-        body_content = html.unescape(re.sub(r'<[^>]+>', '', body_content))
-    sender = ((msg.get('from') or {}).get('user') or {}) or {}
+    n = normalize_chat_message(msg)
     return {
         'id': msg.get('id'),
         'created': msg.get('createdDateTime'),
         'sender': {
-            'display_name': sender.get('displayName'),
-            'id': sender.get('id'),
+            'display_name': n['sender_name'],
+            'id': n['sender_id'],
         },
-        'body': body_content,
-        'body_content_type': body_obj.get('contentType'),
+        'body': n['text'],
+        'body_content_type': (msg.get('body') or {}).get('contentType'),
+        'is_system': n['is_system'],
+        'event_type': n['event_type'],
     }
 
 
@@ -1179,20 +1266,17 @@ def cmd_read(args):
     print(f"\n💬 Messages ({len(messages)} shown):\n")
 
     for msg in messages:
-        sender = ((msg.get('from') or {}).get('user') or {}).get('displayName') or 'System'
-        created = parse_graph_datetime(msg['createdDateTime']).astimezone(LOCAL_TZ)
-        time_str = created.strftime('%Y-%m-%d %H:%M:%S')
-
-        body_obj = msg.get('body') or {}
-        body = body_obj.get('content', '')
-
-        # Clean up HTML if present
-        if body_obj.get('contentType') == 'html':
-            body = html.unescape(re.sub(r'<[^>]+>', '', body))
-
-        print(f"[{time_str}] {sender}")
-        print(f"  {body}")
+        n = normalize_chat_message(msg)
+        print(f"[{_local_time_str(n['created'])}] {n['sender_name']}")
+        print(f"  {n['text']}")
         print()
+
+
+def _local_time_str(created, fmt='%Y-%m-%d %H:%M:%S'):
+    """Format a Graph timestamp in local time ('' if missing)."""
+    if not created:
+        return ''
+    return parse_graph_datetime(created).astimezone(LOCAL_TZ).strftime(fmt)
 
 
 def _read_message_arg(value):
@@ -1443,9 +1527,9 @@ def cmd_search(args):
             filtered = []
             for item in results:
                 msg = item[1]
-                sender_info = (msg.get('from') or {}).get('user') or {}
-                sender_email = sender_info.get('userPrincipalName', '').lower()
-                sender_name = sender_info.get('displayName', '').lower()
+                n = normalize_chat_message(msg)
+                sender_email = n['sender_email'].lower()
+                sender_name = n['sender_name'].lower()
                 if sender_email == from_email or sender_name == from_name:
                     filtered.append(item)
             results = filtered
@@ -1492,15 +1576,10 @@ def cmd_search(args):
         chat_id = item[0] if isinstance(item[0], str) else item[0]['id']
         msg = item[1]
         chat_name = _name_for(item)
-        sender = ((msg.get('from') or {}).get('user') or {}).get('displayName') or 'System'
-        created = parse_graph_datetime(msg['createdDateTime']).astimezone(LOCAL_TZ)
-        time_str = created.strftime('%Y-%m-%d %H:%M:%S')
-
-        body = (msg.get('body') or {}).get('content', '')
-
-        # Clean up HTML if present
-        if (msg.get('body') or {}).get('contentType') == 'html':
-            body = html.unescape(re.sub(r'<[^>]+>', '', body))
+        n = normalize_chat_message(msg)
+        sender = n['sender_name']
+        time_str = _local_time_str(n['created'])
+        body = n['text']
 
         # Search API `summary` snippets pack attachment names against body
         # text with long runs of whitespace (e.g. "WCDE.apk1        client
@@ -1528,15 +1607,13 @@ def cmd_search(args):
                 print()
                 print(f"  --- {len(ctx)} preceding message(s) ---")
                 for cm in ctx:
-                    csender = ((cm.get('from') or {}).get('user') or {}).get('displayName') or 'System'
-                    ctime = parse_graph_datetime(cm['createdDateTime']).astimezone(LOCAL_TZ)
-                    cbody = (cm.get('body') or {}).get('content', '')
-                    if (cm.get('body') or {}).get('contentType') == 'html':
-                        cbody = html.unescape(re.sub(r'<[^>]+>', '', cbody))
-                    cbody = re.sub(r'\s+', ' ', cbody).strip()
+                    cn = normalize_chat_message(cm)
+                    csender = cn['sender_name']
+                    ctime = _local_time_str(cn['created'], '%H:%M:%S')
+                    cbody = re.sub(r'\s+', ' ', cn['text']).strip()
                     if len(cbody) > 120:
                         cbody = cbody[:117] + '...'
-                    print(f"  [{ctime:%H:%M:%S}] {csender}: {cbody}")
+                    print(f'  [{ctime}] {csender}: {cbody}')
 
         # Add separator between results (but not after the last one)
         if i < len(results) - 1:

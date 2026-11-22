@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.3.0 — 2026-11-21
+
+### Added
+
+- **MCP `list_teams_chats` takes an optional `since`**, the same filter as
+  `chat list --since`, through the same code path.
+- **System messages are labelled.** `chat read`, `--json` and the MCP
+  tools show system events (`from: null`) as `System  [members added: 2]`,
+  `[chat renamed: X]` etc., and bot senders by their application name.
+  `--json` and structured output gain `is_system` and `event_type`;
+  system messages now report `sender.display_name` as `"System"`
+  rather than null.
+
+### Fixed
+
+- **`chat list --since` returned 0 chats.** `/me/chats` only includes
+  `lastMessagePreview` when it is in `$expand`, so the filter never saw a
+  timestamp. It is now expanded, which also fills in the previously empty
+  `last_message_*` fields in `--json` and MCP output, and the scan stops
+  at the first chat older than `--since` instead of capping at `-n`.
+- **`chat read --since` paged through the whole chat history** whenever
+  fewer than `-n` messages fell in the window. It now stops at the first
+  older message.
+- **`chat search --context` above 16 broke** (one request with `$top` up
+  to n×3, above Graph's 50 cap) and missed context for older hits. It now
+  pages back to the hit.
+- **Nulls inside a message's `user`** (deleted accounts) no longer crash.
+- **MCP `list_calendar_events` crashed on non-Teams events**, where Graph
+  returns `onlineMeeting: null`. Nullable event fields are now guarded.
+
+### Changed
+
+- One Graph paging helper, `common.iter_graph_pages`, replaces the
+  separate nextLink loops in `chat.py`, and one `normalize_chat_message`
+  is the only reader of a message's sender, body and event detail. CLI
+  and MCP share both.
+
 ## 1.2.1 — 2026-11-21
 
 ### Fixed
