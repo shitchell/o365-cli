@@ -85,15 +85,69 @@ _WELL_KNOWN_FOLDERS = {
 
 _FOLDER_RESOLVE_CACHE = {}
 
+_FOLDER_LIST_SELECT = "id,displayName,childFolderCount"
+
+# Graph object IDs: long, URL-safe/standard base64 alphabet, no spaces.
+_GRAPH_ID_RE = re.compile(r"^[A-Za-z0-9+/_=-]{60,}$")
+
+
+class MailFolderError(Exception):
+    """A mail folder could not be resolved (e.g. the folder list failed)."""
+
+
+class MailFolderNotFoundError(MailFolderError, LookupError):
+    """No mail folder matches the given name."""
+
+
+def _find_folder_id_by_name(folder, access_token):
+    """Breadth-first search of the folder tree for a displayName match.
+
+    Lists the top-level folders, then the children of only those folders that
+    have children, one level at a time. Returns the first (shallowest) match
+    without fetching anything below it. Matching is case-insensitive.
+    """
+    import urllib.parse as _up
+
+    target = folder.casefold()
+    query = _up.urlencode({"$select": _FOLDER_LIST_SELECT, "$top": "100"})
+    level = [f"/me/mailFolders?{query}"]
+
+    while level:
+        next_level = []
+        for url in level:
+            while url:
+                result = make_graph_request(url, access_token)
+                if result is None:
+                    raise MailFolderError(
+                        f"could not list mail folders while looking for {folder!r}"
+                    )
+                for item in result.get("value", []):
+                    if item.get("displayName", "").casefold() == target:
+                        return item["id"]
+                    if item.get("childFolderCount"):
+                        child_id = _up.quote(item["id"], safe="")
+                        next_level.append(
+                            f"/me/mailFolders/{child_id}/childFolders?{query}"
+                        )
+                url = result.get("@odata.nextLink")
+        level = next_level
+
+    return None
+
 
 def resolve_folder(folder, access_token):
     """Resolve a user-supplied folder string to something Graph will accept.
 
     Order of precedence:
       1. Cached resolution from this process.
-      2. Looks-like-a-Graph-folder-ID (starts with AAMk, long) -> pass through.
+      2. Looks like a Graph folder ID (long, base64 alphabet) -> pass through.
       3. Well-known display name -> Graph slug (Inbox, "Sent Items", etc.).
-      4. Otherwise look up displayName via /me/mailFolders.
+      4. Otherwise search the folder tree (including nested folders) by
+         displayName.
+
+    Raises:
+        MailFolderNotFoundError: no folder has that name.
+        MailFolderError: the folder list could not be fetched.
     """
     if not folder:
         return 'inbox'
@@ -101,8 +155,9 @@ def resolve_folder(folder, access_token):
     if folder in _FOLDER_RESOLVE_CACHE:
         return _FOLDER_RESOLVE_CACHE[folder]
 
-    # Pass through long Graph IDs unchanged
-    if folder.startswith('AAMk') and len(folder) > 60:
+    # Pass through Graph folder IDs unchanged. Match on shape, not prefix:
+    # IDs start with AAMk or (older format) AQMk, among others.
+    if _GRAPH_ID_RE.match(folder):
         _FOLDER_RESOLVE_CACHE[folder] = folder
         return folder
 
@@ -110,30 +165,21 @@ def resolve_folder(folder, access_token):
     slug = _WELL_KNOWN_FOLDERS.get(folder.lower())
     if slug:
         _FOLDER_RESOLVE_CACHE[folder] = slug
+        _FOLDER_RESOLVE_CACHE[slug] = slug
         return slug
 
-    # Look up by displayName. OData filter values need URL-encoding because
-    # the URL contains spaces and quotes that the http client won't accept raw.
-    import urllib.parse as _up
-    escaped = folder.replace("'", "''")
-    query = _up.urlencode({
-        '$filter': f"displayName eq '{escaped}'",
-        '$top': '1',
-        '$select': 'id,displayName',
-    })
-    result = make_graph_request(f"/me/mailFolders?{query}", access_token)
-    if result and result.get('value'):
-        folder_id = result['value'][0]['id']
-        _FOLDER_RESOLVE_CACHE[folder] = folder_id
-        return folder_id
-
-    print(
-        f"Error: mail folder {folder!r} not found. "
-        "Use a well-known name (Inbox, \"Sent Items\", Drafts, \"Deleted Items\", "
-        "\"Junk Email\", Outbox, Archive) or the folder's Graph ID.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+    folder_id = _find_folder_id_by_name(folder, access_token)
+    if folder_id is None:
+        raise MailFolderNotFoundError(
+            f"mail folder {folder!r} not found. "
+            'Use a well-known name (Inbox, "Sent Items", Drafts, "Deleted Items", '
+            '"Junk Email", Outbox, Archive), a custom folder\'s name, '
+            "or the folder's Graph ID."
+        )
+    _FOLDER_RESOLVE_CACHE[folder] = folder_id
+    # Resolving an already-resolved value must be a no-op
+    _FOLDER_RESOLVE_CACHE[folder_id] = folder_id
+    return folder_id
 
 
 def parse_graph_datetime(dt_str):
@@ -145,6 +191,19 @@ def parse_graph_datetime(dt_str):
     if not dt_str.endswith('Z') and '+' not in dt_str and '-' not in dt_str[-6:]:
         dt_str += 'Z'
     return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+
+
+def get_message(access_token, message_id):
+    """Fetch one message (with attachments) by ID; None if it can't be fetched.
+
+    Shared by `mail read <ID>` and the MCP get_email_content tool.
+    """
+    import urllib.parse
+
+    msg_id = urllib.parse.quote(message_id, safe="")
+    return make_graph_request(
+        f"{GRAPH_API_BASE}/me/messages/{msg_id}?$expand=attachments", access_token
+    )
 
 
 def get_messages_stream(access_token, folder='Inbox', max_count=None, since=None, unread=None, search=None):
@@ -166,9 +225,14 @@ def get_messages_stream(access_token, folder='Inbox', max_count=None, since=None
         # When searching, search all messages across all folders
         url = f"{GRAPH_API_BASE}/me/messages"
     else:
-        # When not searching, use the specified folder
+        # When not searching, use the specified folder. Display names
+        # ("Sent Items", custom/nested folders) must be resolved to a
+        # well-known slug or folder ID first; raises if it doesn't exist.
         import urllib.parse
-        folder_encoded = urllib.parse.quote(folder)
+
+        folder_encoded = urllib.parse.quote(
+            resolve_folder(folder, access_token), safe=""
+        )
         url = f"{GRAPH_API_BASE}/me/mailFolders/{folder_encoded}/messages"
 
     # Build query parameters - use a reasonable page size for streaming
@@ -464,8 +528,7 @@ def get_message_by_id_structured(access_token, message_id):
     Returns:
         dict: Message dictionary with full body content and attachments
     """
-    url = f"{GRAPH_API_BASE}/me/messages/{message_id}?$expand=attachments"
-    msg = make_graph_request(url, access_token)
+    msg = get_message(access_token, message_id)
 
     if not msg:
         return None
@@ -643,8 +706,7 @@ def cmd_read(args):
     if args.ids:
         messages = []
         for msg_id in args.ids:
-            url = f"{GRAPH_API_BASE}/me/messages/{msg_id}?$expand=attachments"
-            msg = make_graph_request(url, access_token)
+            msg = get_message(access_token, msg_id)
             if not msg:
                 print(f"Error: Message not found: {msg_id}", file=sys.stderr)
                 sys.exit(1)
@@ -658,8 +720,10 @@ def cmd_read(args):
             display_message(msg, html=args.html)
         return
 
-    # Otherwise, list messages with filters
-    folder = resolve_folder(args.folder, access_token)
+    # Otherwise, list messages with filters. Folder names are resolved by
+    # get_messages_stream (shared with the MCP server); only the friendly
+    # exit on an unknown folder lives here.
+    folder = args.folder
     # If -n not specified, show all messages (None = unlimited)
     max_count = args.count
 
@@ -682,29 +746,33 @@ def cmd_read(args):
     # Get user's domain for external sender detection
     user_domain = get_user_domain(access_token)
 
-    # JSON: collect first, emit at end. Text: stream as fetched.
-    if is_json_mode(args):
-        collected = []
-        for page in get_messages_stream(
-            access_token, folder=folder, max_count=max_count,
-            since=since, unread=unread_filter, search=args.search,
-        ):
-            collected.extend(_serialize_message_summary(m) for m in page)
-        emit_json({'messages': collected, 'count': len(collected)})
-        return
-
-    total_displayed = 0
-    for page in get_messages_stream(
+    pages = get_messages_stream(
         access_token,
         folder=folder,
         max_count=max_count,
         since=since,
         unread=unread_filter,
-        search=args.search
-    ):
-        for msg in page:
-            display_message_summary(msg, user_domain)
-            total_displayed += 1
+        search=args.search,
+    )
+
+    # JSON: collect first, emit at end. Text: stream as fetched.
+    total_displayed = 0
+    collected = []
+    try:
+        for page in pages:
+            if is_json_mode(args):
+                collected.extend(_serialize_message_summary(m) for m in page)
+                continue
+            for msg in page:
+                display_message_summary(msg, user_domain)
+                total_displayed += 1
+    except MailFolderError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if is_json_mode(args):
+        emit_json({"messages": collected, "count": len(collected)})
+        return
 
     if total_displayed == 0:
         print("No messages found")
@@ -1182,8 +1250,15 @@ def setup_parser(subparsers):
                             help='Email IDs to read (Graph API message IDs)')
     read_parser.add_argument('-n', '--count', type=int, metavar='N',
                             help='Number of emails to list (default: all, fetched in pages of 50)')
-    read_parser.add_argument('-f', '--folder', type=str, metavar='FOLDER',
-                            help='Folder to read from (default: Inbox)')
+    read_parser.add_argument(
+        "-f",
+        "--folder",
+        type=str,
+        metavar="FOLDER",
+        help="Folder to read from (default: Inbox). Well-known name "
+        '("Sent Items", sentitems, Drafts, ...), a custom or '
+        "nested folder's name, or a folder ID",
+    )
     read_parser.add_argument('-s', '--search', type=str, metavar='PATTERN',
                             help='Search emails by pattern (searches across subject, body, sender, etc.)')
     read_parser.add_argument('--since', type=str, metavar='EXPR',

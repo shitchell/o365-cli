@@ -105,7 +105,7 @@ o365 mail read -s "payment"                  # Search for "payment"
 
 # Read by folder. Display names work (e.g. "Sent Items") — they're resolved
 # to Graph well-known slugs (sentitems/drafts/deleteditems/junkemail/...) or
-# looked up by displayName for custom folders.
+# looked up by displayName for custom folders, including nested ones.
 o365 mail read -f "Sent Items" -n 10
 o365 mail read -f Drafts -n 5
 

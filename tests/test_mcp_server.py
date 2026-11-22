@@ -480,3 +480,55 @@ class TestMCPServerInit:
         assert callable(mcp_server.list_onedrive_files)
         assert callable(mcp_server.list_teams_chats)
         assert callable(mcp_server.search_contacts)
+
+
+class TestMcpReadEmailsFolders:
+    """read_emails resolves folder names and surfaces unknown folders."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_folder_cache(self):
+        from o365 import mail
+
+        mail._FOLDER_RESOLVE_CACHE.clear()
+        yield
+        mail._FOLDER_RESOLVE_CACHE.clear()
+
+    def _read(self, folder):
+        def fake(url, token, *a, **kw):
+            if "/messages" in url:
+                if "/mailFolders/sentitems/" in url:
+                    return {
+                        "value": [
+                            {
+                                "id": "m1",
+                                "subject": "s",
+                                "from": {"emailAddress": {"address": "a@x.com"}},
+                                "receivedDateTime": "2026-01-01T00:00:00Z",
+                                "isRead": True,
+                                "hasAttachments": False,
+                                "bodyPreview": "",
+                                "attachments": [],
+                            }
+                        ]
+                    }
+                return None  # Graph 400 for anything unresolved
+            from tests.test_mail_folders import FakeGraph
+
+            return FakeGraph()(url, token)
+
+        with (
+            patch("o365.mcp_server.get_access_token", return_value="tok"),
+            patch("o365.mail.make_graph_request", fake),
+            patch("o365.mail.get_user_domain", return_value="x.com"),
+        ):
+            return mcp_server.read_emails(folder=folder, limit=3)
+
+    def test_display_name_returns_messages(self):
+        result = self._read("Sent Items")
+        assert result["status"] == "success"
+        assert result["count"] == 1
+
+    def test_unknown_folder_is_an_error_not_empty(self):
+        result = self._read("No Such Folder")
+        assert result["status"] == "error"
+        assert "No Such Folder" in result["error"]
