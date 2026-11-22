@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Nested mail folders resolve by name.** `mail read -f NAME` now finds
+  child folders (e.g. a folder under Inbox), not just top-level ones. The
+  folder tree is searched breadth-first, expanding only folders that have
+  children and stopping at the first match.
+- **MCP `read_emails(folder="Sent Items")` returns mail.** The MCP path
+  skipped folder-name resolution, so display names got a Graph 400 and the
+  tool returned 0 messages with `status: success`. Resolution now happens
+  only in `get_messages_stream`, the one fetch path shared by `mail read`
+  and the MCP server, so a fix there covers both.
+- **Folder IDs starting with `AQMk` are accepted.** IDs were only
+  recognised by an `AAMk` prefix; older-format IDs were treated as display
+  names and failed. IDs are now recognised by shape, and resolution is
+  idempotent.
+- **Unknown folders are an error everywhere.** `resolve_folder` raises
+  `MailFolderNotFoundError` instead of calling `sys.exit`; the CLI still
+  prints a friendly error and exits 1, and the MCP tool returns
+  `status: error` naming the folder.
+
+### Changed
+
+- `mail read <ID>` and the MCP `get_email_content` tool share one
+  `get_message()` helper, which also URL-encodes the message ID.
+
 ## 1.2.0 — 2026-10-29
 
 ### Added
